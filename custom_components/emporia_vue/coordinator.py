@@ -486,27 +486,8 @@ def is_in_reset_debounce_window(
     return timedelta(0) <= elapsed < timedelta(minutes=debounce_minutes)
 
 
-# --- Mains Import/Export split (see sensor.py: VueMainsSplitSensor) -----------
-#
-# Emporia's API does not provide a native gross Import/Export split for most
-# accounts/hardware. We derive it ourselves from the combined "1,2,3" mains
-# channel:
-#   - At MINUTE scale, a single instant only ever flows one direction, so the
-#     sign of that minute's power value is a reliable, correct split.
-#   - At DAY/MONTH scale, taking the sign of the *period's net total* is NOT
-#     valid (a day with both import and export periods nets out to a
-#     misleading single number). Instead we accumulate minute-by-minute,
-#     adding each minute's usage to the Import or Export running total based
-#     on that minute's sign, and reset the totals at midnight/billing-cycle
-#     start the same way last_day_data/last_month_data already do.
-#
-# If your account/hardware exposes native "MainsFromGrid"/"MainsToGrid"
-# channels (check the "Unused data found during update" log line), those are
-# a more authoritative source and this derived-split logic can be retired in
-# favor of just reading those channels directly as regular per-channel
-# sensors.
-
-
+# Derivation logic and the native-channel fallback are documented in
+# docs/protocol.md.
 def add_minute_mains_split(data: dict[str, Any]) -> None:
     """Add synthetic Import/Export power entries derived from the combined mains channel.
 

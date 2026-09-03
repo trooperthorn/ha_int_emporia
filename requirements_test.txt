@@ -1,6 +1,6 @@
 # Test-only dependencies for the Emporia Vue custom component.
 # Not required to run the integration itself — only to run `pytest`.
-pytest==8.3.3
-pytest-homeassistant-custom-component
-homeassistant
+# See docs/operations.md for the install order this file depends on.
+pytest==9.0.3
+homeassistant==2026.9.0
 pyemvue==0.18.9

@@ -27,8 +27,7 @@ MAINS_CHANNEL_NUMS = frozenset(
     {"1", "2", "3", "1,2,3", "Balance", "MainsFromGrid", "MainsToGrid"}
 )
 
-# The single combined 3-phase mains channel used to derive the Grid
-# Import/Export split (see VueMainsSplitSensor in sensor.py).
+# See docs/protocol.md for the derived Grid Import/Export split this feeds.
 MAINS_COMBINED_CHANNEL_NUM = "1,2,3"
 
 # Synthetic channel_num labels used internally for the derived Import/Export
@@ -38,6 +37,9 @@ MAINS_SPLIT_CHANNEL_IMPORT = "MainsImport"
 MAINS_SPLIT_CHANNEL_EXPORT = "MainsExport"
 MAINS_SPLIT_CHANNELS = frozenset({MAINS_SPLIT_CHANNEL_IMPORT, MAINS_SPLIT_CHANNEL_EXPORT})
 
+# extra=ALLOW_EXTRA: async_step_user branches to async_step_email_password
+# when email/password are present in the submitted data, so this schema must
+# accept those keys even though it only declares AUTH_METHOD.
 AUTH_METHOD_SCHEMA = vol.Schema(
     {
         vol.Required(AUTH_METHOD, default=AUTH_METHOD_EMAIL_PASSWORD): vol.In(
@@ -46,7 +48,8 @@ AUTH_METHOD_SCHEMA = vol.Schema(
                 AUTH_METHOD_TOKENS: "Emporia tokens (Google/SSO accounts)",
             }
         ),
-    }
+    },
+    extra=vol.ALLOW_EXTRA,
 )
 
 CONFIG_OPTIONS_SCHEMA = {

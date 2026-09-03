@@ -1,0 +1,5 @@
+# Security-sensitive runtime and delivery surfaces require owner review.
+/custom_components/emporia_vue/ @trooperthorn
+/.github/workflows/ @trooperthorn
+/SECURITY.md @trooperthorn
+

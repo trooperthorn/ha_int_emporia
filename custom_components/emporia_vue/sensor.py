@@ -33,21 +33,14 @@ from .const import (
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-# All sensors here are read-only and backed by coordinators, which already
-# serialize their own API calls — no need to further limit concurrent entity
-# updates.
+# See docs/design.md for why sensors don't need PARALLEL_UPDATES limiting.
 PARALLEL_UPDATES = 0
 
-# Emporia's channel_type_gid for solar production channels. Used to make
-# sure solar isn't double-subtracted in the Balance calculation (see
-# VueBalanceSensor.native_value) — solar already nets out of the Mains
-# reading physically, since the Mains CTs sit upstream of the solar
-# interconnection point.
+# See docs/protocol.md for why solar channels are excluded from Balance.
 SOLAR_CHANNEL_TYPE_GID = 13
 
-# Native Emporia channel labels for a device-side, already-computed
-# Import/Export split. Where present, these are preferred over our own
-# minute-integrated derivation (see VueMainsSplitSensor).
+# Native Emporia channel labels; see docs/protocol.md for the derived
+# fallback these take priority over.
 NATIVE_MAINS_FROM_GRID = "MainsFromGrid"
 NATIVE_MAINS_TO_GRID = "MainsToGrid"
 
@@ -139,9 +132,7 @@ async def async_setup_entry(
                 )
             )
 
-    # 1. ADD PER-CHANNEL SENSORS FOR ALL THREE SCALES
-    
-    # --- FIX 1: Prime coordinator data with virtual API channels (TotalUsage, Balance) ---
+    # Seed virtual channels before building entities; see docs/design.md.
     for gid, device in device_information.items():
         for coord, scale in [
             (coordinator_1min, "1MIN"),
@@ -158,16 +149,12 @@ async def async_setup_entry(
                             "scale": scale,
                             "info": device
                         }
-    # -------------------------------------------------------------------------------------
 
     add_scale_block(coordinator_1min, enable_1m)
     add_scale_block(coordinator_day_sensor, enable_1d)
     add_scale_block(coordinator_1mon, enable_1mon)
 
-    # 2. ADD BALANCE AND GRID IMPORT/EXPORT SENSORS FOR ALL THREE SCALES
     for gid, device in device_information.items():
-        # FIX 2: Removed `if _device_is_true_mains_panel(device):` restriction to unblock 
-        # Balance & Mains generation on monitors handling solar/net metering.
         for coordinator, scale in (
             (coordinator_1min, "1MIN"),
             (coordinator_day_sensor, "1D"),
@@ -182,7 +169,6 @@ async def async_setup_entry(
                     VueMainsSplitSensor(coordinator, device, scale, "Export")
                 )
 
-    # 3. ADD CHARGER STATUS & CHARGE TIME SENSORS
     if coordinator_device_status and coordinator_device_status.data:
         soc_sensor = config_entry.options.get("vehicle_soc_sensor")
 
@@ -201,7 +187,6 @@ async def async_setup_entry(
 
     async_add_entities(all_entities)
 
-    # 4. CLEAN UP / DISABLE DEVICES WITH ZERO ACTIVE ENTITIES
     active_identifiers: set[tuple[str, str]] = set()
     for entity in all_entities:
         info = entity.device_info
@@ -236,7 +221,6 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         channel_num: str = coordinator.data[identifier]["channel_num"]
         self._device: VueDevice = coordinator.data[identifier]["info"]
 
-        # REMOVED INITIAL USAGE CHECK SO ENTITIES ARE NEVER HIDDEN ON REBOOT
         self._attr_entity_registry_enabled_default = force_enabled
 
         final_channel: VueDeviceChannel | None = None
@@ -246,14 +230,13 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
                     final_channel = channel
                     break
 
-        # --- FIX 3: Generate mock physical channels for Emporia's virtual metrics ---
+        # Virtual channels have no real VueDeviceChannel; see docs/design.md.
         if final_channel is None and channel_num in ["TotalUsage", "Balance"]:
             final_channel = VueDeviceChannel()
             final_channel.device_gid = device_gid
             final_channel.channel_num = channel_num
             final_channel.channel_multiplier = 1.0
             final_channel.name = "Total Usage" if channel_num == "TotalUsage" else "API Balance"
-        # ----------------------------------------------------------------------------
 
         if final_channel is None:
             _LOGGER.warning(

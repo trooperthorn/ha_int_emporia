@@ -11,6 +11,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries, exceptions
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import selector
@@ -171,7 +172,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the initial step."""
         if user_input is not None:
             if CONF_EMAIL in user_input and CONF_PASSWORD in user_input:
-                return await self.async_step_email_password(user_input)
+                return await self.async_step_email_password()
             if user_input[AUTH_METHOD] == AUTH_METHOD_TOKENS:
                 return await self.async_step_tokens()
             return await self.async_step_email_password()
@@ -195,6 +196,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=info[CONFIG_TITLE], data=info
                 )
+            except AbortFlow:
+                raise
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -223,6 +226,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=info[CONFIG_TITLE], data=info
                 )
+            except AbortFlow:
+                raise
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:

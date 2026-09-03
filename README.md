@@ -1,18 +1,12 @@
 # emporia_vue Home Assistant Integration
 
-# MODIFIED for Full Home Assistant Energy support. Coding optimization via GEMINI Pro.
-Changes:
-- EV Charging Slider. It works you can watch it change in the app.
-- EV Automation Blueprints!!!
-- Properly formatted for Energy Category
-- Properly added Balance for overage of non-sensors
-- Restart registered all sensors
-- aSync calls to pyVue
-- 12am does not give you a total of yesterday, blame Solar and HA. HA doesnt want negative values.
-- EV is more usable. Dynamic Solar Charging Automation; I want to be able to set the Amp values. My electric monthly bill is less than a McDonalds meal for 2.
-  
+Reads data from the Emporia Vue energy monitor. Creates a sensor for each
+device channel showing average usage over each minute, with support for the
+Home Assistant Energy dashboard, EV charging control, and EV charging
+automation blueprints.
 
-Reads data from the Emporia Vue energy monitor. Creates a sensor for each device channel showing average usage over each minute.
+See [docs/README.md](docs/README.md) for the integration's architecture,
+Emporia API and device facts, and dated design decisions.
 
 Note: This project is not associated with or endorsed by Emporia Energy.
 

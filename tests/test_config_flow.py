@@ -27,8 +27,17 @@ def _mock_customer(gid: str = "42", email: str = "test@example.com") -> MagicMoc
 
 @pytest.fixture
 def mock_pyemvue():
-    """Patch pyemvue.PyEmVue with a MagicMock, successful login by default."""
-    with patch("pyemvue.PyEmVue") as mock_cls:
+    """Patch pyemvue.PyEmVue with a MagicMock, successful login by default.
+
+    Patches both the config flow's local import (used during setup
+    validation) and __init__.py's module-level import (used once the
+    entry is created and Home Assistant sets it up), so a successful
+    config flow test doesn't fall through to a real network call.
+    """
+    with (
+        patch("pyemvue.PyEmVue") as mock_cls,
+        patch("custom_components.emporia_vue.PyEmVue", new=mock_cls),
+    ):
         instance = mock_cls.return_value
         instance.login.return_value = True
         instance.customer = _mock_customer()

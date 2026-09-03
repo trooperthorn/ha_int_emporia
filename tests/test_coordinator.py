@@ -65,7 +65,7 @@ def test_determine_reset_datetime_month_after_cycle_start():
 
 def test_determine_reset_datetime_month_clamps_short_month():
     """A cycle-start day past the end of a short month clamps to the last day."""
-    local_time = datetime(2026, 2, 27, tzinfo=UTC)
+    local_time = datetime(2026, 3, 5, tzinfo=UTC)
     reset = determine_reset_datetime(local_time, monthly_cycle_start=31, is_month=True)
     assert reset == datetime(2026, 2, 28, tzinfo=UTC)
 

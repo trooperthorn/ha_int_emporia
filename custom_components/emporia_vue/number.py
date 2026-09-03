@@ -24,9 +24,7 @@ from .const import DOMAIN
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-# This entity issues direct writes to the Emporia API (charger current).
-# Limit to one in-flight write at a time so two near-simultaneous changes
-# can't race each other against the API.
+# See docs/design.md for why this platform limits write concurrency.
 PARALLEL_UPDATES = 1
 
 
@@ -137,10 +135,7 @@ class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: 
                 translation_placeholders={"error": str(err)},
             ) from err
         else:
-            # Only clear the optimistic override once the coordinator's data
-            # actually agrees with what we set — Emporia's API can be
-            # eventually-consistent, so a refresh right after a successful
-            # write may still briefly report the old value.
+            # See docs/protocol.md: charger writes are eventually consistent.
             data = self.coordinator.data.get(self._device_gid)
             if data and float(data.charging_rate) == self._optimistic_value:
                 self._optimistic_value = None

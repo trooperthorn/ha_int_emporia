@@ -23,9 +23,7 @@ from .const import DOMAIN
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-# These entities issue direct writes to the Emporia API (outlet/charger
-# on-off). Limit to one in-flight write at a time so two near-simultaneous
-# toggles can't race each other against the API.
+# See docs/design.md for why this platform limits write concurrency.
 PARALLEL_UPDATES = 1
 
 

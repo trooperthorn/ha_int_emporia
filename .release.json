@@ -1,0 +1,8 @@
+{
+  "tag_prefix": "v",
+  "timezone": "America/Chicago",
+  "release_paths": ["custom_components/emporia_vue"],
+  "version_fields": [
+    {"path": "custom_components/emporia_vue/manifest.json", "kind": "json", "key": "version"}
+  ]
+}
