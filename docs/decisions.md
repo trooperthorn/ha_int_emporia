@@ -69,3 +69,19 @@ generation on monitors that handle solar or net metering but do not match
 the true-mains-panel shape. The restriction was removed so those monitors
 also get Balance and Mains Import/Export sensors; see
 [design.md](design.md#balance-and-mains-importexport-sensors-are-unconditional).
+
+## 2026-09-04: boto3 is pinned to core's own constraint
+
+`boto3==1.42.97` replaces the `>=1.37.1,<1.43.0` range so installs are
+reproducible; the value is the one core 2026.9.0 pins in
+`package_constraints.txt`, which sits inside the range pyemvue accepts.
+Rejected: keeping the range, which let two installs of the same version
+resolve different boto3 releases.
+
+## 2026-09-04: the config flow keeps `async_update_reload_and_abort`
+
+The scanner flags the two reload sites because combining them with a config
+entry update listener becomes an error in core 2026.12 (developer blog
+2026-05-07). This integration registers no update listener, so the flow's
+reloads are the only reload path and the rule does not apply.
+
