@@ -130,7 +130,7 @@ jobs:
           REMOTE_SHA="$(git ls-remote --heads origin "refs/heads/$BRANCH" | awk '{print $1}')"
           git switch --force-create "$BRANCH" origin/main
 
-          VERSION="$(python3 -m scripts.set_version \
+          VERSION="$(python3 scripts/set_version.py \
             --next-from-tags --timezone America/Chicago)"
           git config user.name "$BOT_NAME"
           git config user.email "$BOT_EMAIL"
