@@ -85,3 +85,15 @@ entry update listener becomes an error in core 2026.12 (developer blog
 2026-05-07). This integration registers no update listener, so the flow's
 reloads are the only reload path and the rule does not apply.
 
+
+## 2026-09-06: boto3 is a range again, bounded by core's constraint
+
+This supersedes the 2026-09-04 entry above. Core passes `package_constraints.txt` to pip
+as a constraint when it installs a custom integration's requirements, so the exact
+`boto3==1.42.97` pin only installed while it equalled core's pin; the first core point
+release to move boto3 would have failed setup with "Requirements for emporia_vue not
+found", which is exactly what core 2026.9.1 did to the Elk-M1 and Davis integrations
+through `serialx` on 2026-09-06. The manifest now declares `boto3>=1.42.97,<2`. The
+reproducibility argument of the earlier entry does not hold: on any given core the
+constraint file fixes the version, so a range resolves to the same release every time.
+Rejected: keeping the exact pin and bumping it after each core release.
