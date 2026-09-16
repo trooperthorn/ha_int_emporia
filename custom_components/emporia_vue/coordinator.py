@@ -607,11 +607,18 @@ class VueDayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         and "usage" in runtime.last_day_data[day_id]
                         and runtime.last_day_data[day_id]["usage"] is not None
                     ):
-                        timestamp: datetime = data["timestamp"]
-                        await runtime.check_for_midnight(
-                            timestamp, int(device_gid), day_id, runtime.last_day_data
-                        )
-                        runtime.last_day_data[day_id]["usage"] += data["usage"]
+                        timestamp: datetime | None = data.get("timestamp")
+                        if timestamp is None:
+                            _LOGGER.warning(
+                                "Skipping minute data for %s: missing timestamp"
+                                " (device may have returned an empty API response)",
+                                day_id,
+                            )
+                        else:
+                            await runtime.check_for_midnight(
+                                timestamp, int(device_gid), day_id, runtime.last_day_data
+                            )
+                            runtime.last_day_data[day_id]["usage"] += data["usage"]
 
                     if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
                         await runtime.integrate_mains_split(
@@ -666,11 +673,18 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         and "usage" in runtime.last_month_data[month_id]
                         and runtime.last_month_data[month_id]["usage"] is not None
                     ):
-                        timestamp: datetime = data["timestamp"]
-                        await runtime.check_for_new_month(
-                            timestamp, int(device_gid), month_id, runtime.last_month_data
-                        )
-                        runtime.last_month_data[month_id]["usage"] += data["usage"]
+                        timestamp: datetime | None = data.get("timestamp")
+                        if timestamp is None:
+                            _LOGGER.warning(
+                                "Skipping minute data for %s: missing timestamp"
+                                " (device may have returned an empty API response)",
+                                month_id,
+                            )
+                        else:
+                            await runtime.check_for_new_month(
+                                timestamp, int(device_gid), month_id, runtime.last_month_data
+                            )
+                            runtime.last_month_data[month_id]["usage"] += data["usage"]
 
                     if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
                         await runtime.integrate_mains_split(
