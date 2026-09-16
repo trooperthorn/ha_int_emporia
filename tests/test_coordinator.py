@@ -13,7 +13,9 @@ from custom_components.emporia_vue.coordinator import (
     carry_forward_mains_split,
     determine_reset_datetime,
     fix_usage_sign,
+    get_sample_timestamp,
     is_in_reset_debounce_window,
+    is_newer_sample,
 )
 
 
@@ -147,3 +149,44 @@ def test_carry_forward_mains_split_preserves_running_totals():
     assert new_data["123-MainsExport-1D"]["usage"] == 3.0
     # A key already present in new_data (a real API channel) is never overwritten.
     assert new_data["123-1,2,3-1D"]["usage"] == 10.0
+
+
+def test_is_newer_sample_true_when_no_previous():
+    """Any timestamped sample is newer than no previous sample."""
+    candidate = datetime(2026, 8, 21, 0, 1, tzinfo=UTC)
+    assert is_newer_sample(candidate, None) is True
+
+
+def test_is_newer_sample_false_when_candidate_missing():
+    """A sample with no timestamp is never treated as newer."""
+    assert is_newer_sample(None, datetime(2026, 8, 21, 0, 1, tzinfo=UTC)) is False
+
+
+def test_is_newer_sample_false_when_not_advanced():
+    """A repeated (or older) sample is not newer, guarding against double-counting."""
+    previous = datetime(2026, 8, 21, 0, 1, tzinfo=UTC)
+    assert is_newer_sample(previous, previous) is False
+    assert is_newer_sample(previous - timedelta(minutes=1), previous) is False
+
+
+def test_is_newer_sample_true_when_advanced():
+    """A later timestamp is newer than the previous one."""
+    previous = datetime(2026, 8, 21, 0, 1, tzinfo=UTC)
+    candidate = previous + timedelta(minutes=1)
+    assert is_newer_sample(candidate, previous) is True
+
+
+def test_get_sample_timestamp_returns_first_present():
+    """The batch timestamp is read from whichever entry has one."""
+    timestamp = datetime(2026, 8, 21, 0, 1, tzinfo=UTC)
+    data = {
+        "123-1-1MIN": {"usage": 1.0, "timestamp": timestamp},
+        "123-2-1MIN": {"usage": 2.0, "timestamp": timestamp},
+    }
+    assert get_sample_timestamp(data) == timestamp
+
+
+def test_get_sample_timestamp_none_when_empty_or_missing():
+    """An empty batch, or one with no timestamped entries, yields None."""
+    assert get_sample_timestamp({}) is None
+    assert get_sample_timestamp({"123-1-1MIN": {"usage": 1.0}}) is None

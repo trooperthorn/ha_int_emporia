@@ -51,6 +51,8 @@ class VueRuntimeData:
     last_day_update: datetime | None = None
     last_month_data: dict[str, Any] = field(default_factory=dict)
     last_month_update: datetime | None = None
+    last_day_integrated_at: datetime | None = None
+    last_month_integrated_at: datetime | None = None
     invert_solar: bool = True
 
     coordinator_1min: "VueMinuteCoordinator | None" = None
@@ -535,6 +537,28 @@ def carry_forward_mains_split(old_data: dict[str, Any], new_data: dict[str, Any]
             new_data[key] = value
 
 
+def get_sample_timestamp(data: dict[str, Any]) -> datetime | None:
+    """Return the timestamp shared by a batch of channel usage entries."""
+    for entry in data.values():
+        if entry and entry.get("timestamp"):
+            return entry["timestamp"]
+    return None
+
+
+def is_newer_sample(candidate: datetime | None, previous: datetime | None) -> bool:
+    """Return True if candidate is a genuinely newer sample than previous.
+
+    Used to skip re-integrating a minute-data batch that hasn't advanced,
+    which would otherwise double-count usage when a transient update
+    failure causes the same last-known-good sample to be seen again.
+    """
+    if candidate is None:
+        return False
+    if previous is None:
+        return True
+    return candidate > previous
+
+
 class VueMinuteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator for 1-minute power data."""
 
@@ -554,7 +578,15 @@ class VueMinuteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         This is the place to pre-process the data to lookup tables so
         entities can quickly look up their data.
         """
-        data: dict = await self.runtime.update_sensors([Scale.MINUTE.value])
+        try:
+            data: dict = await self.runtime.update_sensors([Scale.MINUTE.value])
+        except UpdateFailed:
+            if self.data:
+                _LOGGER.warning(
+                    "Minute update failed; returning last-known-good data"
+                )
+                return self.data
+            raise
         if data:
             add_minute_mains_split(data)
             self.runtime.last_minute_data = data
@@ -583,47 +615,62 @@ class VueDayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             _LOGGER.info("Updating day sensors")
             runtime.last_day_update = now
-            updated_day_data = await runtime.update_sensors([Scale.DAY.value])
+            try:
+                updated_day_data = await runtime.update_sensors([Scale.DAY.value])
+            except UpdateFailed:
+                if self.data:
+                    _LOGGER.warning(
+                        "Day update failed; returning last-known-good data"
+                    )
+                    return self.data
+                raise
             apply_api_update_debounce(updated_day_data, runtime.last_day_data, "day")
             # Preserve locally-accumulated Import/Export totals across the
             # API refresh; Emporia's API doesn't provide these directly.
             carry_forward_mains_split(runtime.last_day_data, updated_day_data)
             runtime.last_day_data = updated_day_data
-        else:
+        elif runtime.last_minute_data and is_newer_sample(
+            get_sample_timestamp(runtime.last_minute_data), runtime.last_day_integrated_at
+        ):
             _LOGGER.info("Integrating minute data into day sensors")
-            if runtime.last_minute_data:
-                for identifier, data in runtime.last_minute_data.items():
-                    device_gid, channel_gid, _ = identifier.split("-")
-                    if channel_gid in MAINS_SPLIT_CHANNELS:
-                        # Handled below via integrate_mains_split, sourced
-                        # from the combined mains channel directly.
-                        continue
-                    day_id: str = f"{device_gid}-{channel_gid}-{Scale.DAY.value}"
-                    if (
-                        data
-                        and runtime.last_day_data
-                        and day_id in runtime.last_day_data
-                        and runtime.last_day_data[day_id]
-                        and "usage" in runtime.last_day_data[day_id]
-                        and runtime.last_day_data[day_id]["usage"] is not None
-                    ):
-                        timestamp: datetime | None = data.get("timestamp")
-                        if timestamp is None:
-                            _LOGGER.warning(
-                                "Skipping minute data for %s: missing timestamp"
-                                " (device may have returned an empty API response)",
-                                day_id,
-                            )
-                        else:
-                            await runtime.check_for_midnight(
-                                timestamp, int(device_gid), day_id, runtime.last_day_data
-                            )
-                            runtime.last_day_data[day_id]["usage"] += data["usage"]
-
-                    if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
-                        await runtime.integrate_mains_split(
-                            device_gid, data, runtime.last_day_data, is_month=False
+            for identifier, data in runtime.last_minute_data.items():
+                device_gid, channel_gid, _ = identifier.split("-")
+                if channel_gid in MAINS_SPLIT_CHANNELS:
+                    # Handled below via integrate_mains_split, sourced
+                    # from the combined mains channel directly.
+                    continue
+                day_id: str = f"{device_gid}-{channel_gid}-{Scale.DAY.value}"
+                if (
+                    data
+                    and runtime.last_day_data
+                    and day_id in runtime.last_day_data
+                    and runtime.last_day_data[day_id]
+                    and "usage" in runtime.last_day_data[day_id]
+                    and runtime.last_day_data[day_id]["usage"] is not None
+                ):
+                    timestamp: datetime | None = data.get("timestamp")
+                    if timestamp is None:
+                        _LOGGER.warning(
+                            "Skipping minute data for %s: missing timestamp"
+                            " (device may have returned an empty API response)",
+                            day_id,
                         )
+                    else:
+                        await runtime.check_for_midnight(
+                            timestamp, int(device_gid), day_id, runtime.last_day_data
+                        )
+                        runtime.last_day_data[day_id]["usage"] += data["usage"]
+
+                if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
+                    await runtime.integrate_mains_split(
+                        device_gid, data, runtime.last_day_data, is_month=False
+                    )
+            runtime.last_day_integrated_at = get_sample_timestamp(runtime.last_minute_data)
+        else:
+            _LOGGER.debug(
+                "Skipping day integration: no newer minute sample since %s",
+                runtime.last_day_integrated_at,
+            )
         return runtime.last_day_data
 
 
@@ -649,7 +696,15 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ) > timedelta(minutes=30):
             _LOGGER.info("Updating month sensors")
             runtime.last_month_update = now
-            updated_month_data = await runtime.update_sensors([Scale.MONTH.value])
+            try:
+                updated_month_data = await runtime.update_sensors([Scale.MONTH.value])
+            except UpdateFailed:
+                if self.data:
+                    _LOGGER.warning(
+                        "Month update failed; returning last-known-good data"
+                    )
+                    return self.data
+                raise
             apply_api_update_debounce(
                 updated_month_data,
                 runtime.last_month_data,
@@ -657,39 +712,46 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             carry_forward_mains_split(runtime.last_month_data, updated_month_data)
             runtime.last_month_data = updated_month_data
-        else:
+        elif runtime.last_minute_data and is_newer_sample(
+            get_sample_timestamp(runtime.last_minute_data), runtime.last_month_integrated_at
+        ):
             _LOGGER.info("Integrating minute data into month sensors")
-            if runtime.last_minute_data:
-                for identifier, data in runtime.last_minute_data.items():
-                    device_gid, channel_gid, _ = identifier.split("-")
-                    if channel_gid in MAINS_SPLIT_CHANNELS:
-                        continue
-                    month_id: str = f"{device_gid}-{channel_gid}-{Scale.MONTH.value}"
-                    if (
-                        data
-                        and runtime.last_month_data
-                        and month_id in runtime.last_month_data
-                        and runtime.last_month_data[month_id]
-                        and "usage" in runtime.last_month_data[month_id]
-                        and runtime.last_month_data[month_id]["usage"] is not None
-                    ):
-                        timestamp: datetime | None = data.get("timestamp")
-                        if timestamp is None:
-                            _LOGGER.warning(
-                                "Skipping minute data for %s: missing timestamp"
-                                " (device may have returned an empty API response)",
-                                month_id,
-                            )
-                        else:
-                            await runtime.check_for_new_month(
-                                timestamp, int(device_gid), month_id, runtime.last_month_data
-                            )
-                            runtime.last_month_data[month_id]["usage"] += data["usage"]
-
-                    if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
-                        await runtime.integrate_mains_split(
-                            device_gid, data, runtime.last_month_data, is_month=True
+            for identifier, data in runtime.last_minute_data.items():
+                device_gid, channel_gid, _ = identifier.split("-")
+                if channel_gid in MAINS_SPLIT_CHANNELS:
+                    continue
+                month_id: str = f"{device_gid}-{channel_gid}-{Scale.MONTH.value}"
+                if (
+                    data
+                    and runtime.last_month_data
+                    and month_id in runtime.last_month_data
+                    and runtime.last_month_data[month_id]
+                    and "usage" in runtime.last_month_data[month_id]
+                    and runtime.last_month_data[month_id]["usage"] is not None
+                ):
+                    timestamp: datetime | None = data.get("timestamp")
+                    if timestamp is None:
+                        _LOGGER.warning(
+                            "Skipping minute data for %s: missing timestamp"
+                            " (device may have returned an empty API response)",
+                            month_id,
                         )
+                    else:
+                        await runtime.check_for_new_month(
+                            timestamp, int(device_gid), month_id, runtime.last_month_data
+                        )
+                        runtime.last_month_data[month_id]["usage"] += data["usage"]
+
+                if channel_gid == MAINS_COMBINED_CHANNEL_NUM:
+                    await runtime.integrate_mains_split(
+                        device_gid, data, runtime.last_month_data, is_month=True
+                    )
+            runtime.last_month_integrated_at = get_sample_timestamp(runtime.last_minute_data)
+        else:
+            _LOGGER.debug(
+                "Skipping month integration: no newer minute sample since %s",
+                runtime.last_month_integrated_at,
+            )
         return runtime.last_month_data
 
 
@@ -725,4 +787,11 @@ class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     data[str(charger.device_gid)] = charger
             return data
         except Exception as err:
+            if self.data:
+                _LOGGER.warning(
+                    "Error communicating with Emporia API: %s; "
+                    "returning last-known-good data",
+                    err,
+                )
+                return self.data
             raise UpdateFailed(f"Error communicating with Emporia API: {err}") from err
