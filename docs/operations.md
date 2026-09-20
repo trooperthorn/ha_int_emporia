@@ -22,3 +22,35 @@ python -m pytest tests/ -q
 Unix-only. Run the test suite from WSL (or another Linux/macOS
 environment) on a Windows development machine; it cannot run under the
 native Windows Python.
+
+## Probing the Emporia cloud API
+
+`scripts/api_probe.py` authenticates as you and issues a read-only GET against
+every endpoint catalogued in [api-reference.md](api-reference.md), writing a
+JSON capture and a human-readable log. Use it to turn a **B-apk** row in that
+document into a verified one.
+
+It issues GET requests only; there is no write path in it. Your password is
+read with `getpass`, never passed on the command line, and never written to
+either output file. Personal fields are redacted from the capture by default —
+device gids and serials are not, so scrub a capture before sharing it.
+
+It runs on Windows natively; unlike the test suite it has no `fcntl`
+dependency. It needs `pyemvue`, which it uses purely for the Cognito login.
+
+```bash
+pip install pyemvue
+python scripts/api_probe.py --email you@example.com --token-file ~/.emporia-probe.json
+```
+
+To work out which cloud feature owns the EV charging rate, capture, change one
+setting in the Emporia app, capture again, and diff:
+
+```bash
+python scripts/api_probe.py --token-file ~/.emporia-probe.json --label before
+# ... change one thing in the app ...
+python scripts/api_probe.py --token-file ~/.emporia-probe.json --label after
+python scripts/api_probe.py --diff emporia-probe-*-before.json emporia-probe-*-after.json
+```
+
+Captures are not committed. Keep them outside the working tree.
