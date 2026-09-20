@@ -86,13 +86,19 @@ with no new request. Only *setting* one still needs an uncaptured write.
 
 | Host | Role | Level |
 | --- | --- | --- |
-| `https://api.emporiaenergy.com` | Legacy API. Everything PyEmVue — and therefore this integration — talks to. | V-live |
-| `https://c-api.emporiaenergy.com` | Modern `/v1/...` API. What the current app and Emporia's MCP server use. This integration does not touch it. | V-live |
+| `https://api.emporiaenergy.com` | Legacy API — **and `/v1` too**. Everything PyEmVue talks to, plus the `/v1` routes the web app uses. | V-live |
+| `https://c-api.emporiaenergy.com` | Modern `/v1/...` API. Emporia's MCP server uses this host. This integration does not touch it. | V-live |
+| `https://web.emporiaenergy.com` | The official web app — the same Flutter build. Its writes are capturable. | V-live |
 | `https://auth.emporiaenergy.com` | OAuth2 authorize/token. | B-apk |
 | `https://mcp.emporiaenergy.com` | Emporia's hosted MCP endpoint (`/sse`, `/streamable`). | V-mcp |
 | `https://cognito-idp.us-east-2.amazonaws.com/` | AWS Cognito user pool. Both the app and PyEmVue authenticate here. | V-lib, V-mcp |
 | `https://s3.amazonaws.com/.../maintenance/maintenance.json` | Maintenance banner. Unauthenticated. | V-lib |
 | `dev3api`, `dev3-c-api`, `dev3-auth.emporiaenergy.com` | Emporia development environment. Present in the shipping binary; do not use. | B-apk |
+
+**`/v1` is served on both hosts.** Captured writes from the official web app go
+to `https://api.emporiaenergy.com/v1/...`, while Emporia's own MCP server points
+`/v1` at `c-api`. Both answered the same `/v1` reads in testing. Prefer whichever
+host a captured request actually used, and do not assume `/v1` implies `c-api`.
 
 **Auth differs per host** (V-live, confirmed by a working probe against both):
 the Cognito **id token** goes in an `AuthToken` header on the legacy host, and
@@ -157,7 +163,7 @@ more than `pyemvue.device` models:
 
 ---
 
-## Modern API — `c-api.emporiaenergy.com/v1`
+## Modern API — the `/v1` surface
 
 **This integration uses none of it.** Required parameters below are quoted from
 the live 400 responses.
@@ -172,7 +178,7 @@ the live 400 responses.
 | `/v1/customers/devices/status` | **200** | Live status by category. The `evses[]` entry is the richest charger view available — see below. |
 | `/v1/customers/devices/channels` | **200** | Nested channel tree keyed on `channel_id`, with `sub_type` giving the channel type as a display string. |
 | `/v1/customers/sites/members` | **405** | `"Request method 'GET' is not supported"` — write-only. |
-| `/v1/customers/devices/settings` | **405** | Write-only. |
+| `/v1/customers/devices/settings` | **405 on GET** | `PUT` only — it is the modern charge-rate write. See [Writes](#writes). |
 | `/v1/customers/devices/third-party-access` | **400** | Requires `device_id`. |
 | `/v1/customers/app-preferences` | **406** | `"No acceptable representation"` — needs a specific `Accept` header. |
 | `/v1/customers/homepage/summary` | **400** | Requires `device_ids`. |
@@ -204,6 +210,7 @@ the live 400 responses.
 | `/v1/devices/evses/sessions` | **200** | Params `device_ids`, `start`, `end`. Per-session history with **start/stop reasons**. |
 | `/v1/customers/ev-charging-report` | **200** | Params `device_id`, `start`, `end`. Cost against the account's real rate plan. |
 | `/v1/customers/evse/charging-history` | **400** | Requires **`device_id`** singular, not `device_ids`. |
+| `/v1/customers/evse/control` | **POST only** | Charger on/off. Contract captured — see [Writes](#writes). |
 | `/v1/vehicles/brands` | **200** | 40 strings, for the cosmetic "Vehicle Make" field. |
 
 ### Rates and misc
@@ -505,6 +512,94 @@ For reference, the shape PyEmVue still models: `/customers/vehicles` →
 
 ---
 
+## Writes
+
+Captured from the **official Emporia web app** (`web.emporiaenergy.com`) — the
+same Flutter application compiled for the browser, whose XHR/fetch calls are
+readable without TLS interception. Both writes go to the **legacy host** with a
+`/v1` path.
+
+### Charger on/off — `POST /v1/customers/evse/control`
+
+V-live, captured from the web app's Pause / Resume buttons.
+
+```http
+POST https://api.emporiaenergy.com/v1/customers/evse/control
+Authorization: <cognito id token>
+
+{"device_id": "D…", "command": "TURN_OFF"}
+```
+
+`command` is `TURN_OFF` (pause) or `TURN_ON` (resume). It carries **no charging
+rate** — unlike the legacy `PUT /devices/evcharger` this integration uses, which
+sends `chargerOn` and `chargingRate` together and so cannot change one without
+restating the other.
+
+**A pause/resume cycle clears an active override.** Verified: with an Excess
+Solar override running until 2:40 pm, `TURN_OFF` immediately followed by
+`TURN_ON` handed control back to Excess Solar — the Charge Rate screen returned
+to "Managed by Excess Solar". That is a fully captured way to *release* an
+override even though creating one is not yet captured.
+
+### Charge rate — `PUT /v1/customers/devices/settings`
+
+V-live, captured from the web app's Charge Rate slider.
+
+```http
+PUT https://api.emporiaenergy.com/v1/customers/devices/settings
+
+{"device_id": "D…", "device_type": "EV_CHARGER", "charger_on": null, "charging_rate": 34}
+```
+
+`charger_on: null` means "leave the on/off state alone" — rate and on/off are
+separable here. This is why `GET` on the same path answers 405: it is PUT-only.
+`device_type` is a discriminator; only `EV_CHARGER` has been observed.
+
+### Still uncaptured
+
+The web build has **no "Manage Charging" sheet** — only Pause / Resume — so the
+phone app's **"Charge at full power"** could not be captured there, and the
+phone's own traffic is not interceptable: Flutter's `dart:io` client uses
+BoringSSL with a compiled-in root store and ignores Android's user CA store.
+
+1. **`POST /v1/customers/devices/override`** — the override create. Requires
+   `device_id`. Binary symbols suggest a payload carrying `charging_action`, an
+   override type from `OVERRIDE_EXCESS_SOLAR` /
+   `OVERRIDE_PEAK_DEMAND_CHARGE_OR_PAUSE` / `OVERRIDE_PEAK_DEMAND_RESUME` /
+   `OVERRIDE_UTILITY`, and one of `duration_seconds` / `expires_at` /
+   `expires_in`, with `ENTIRE_DURATION` and `overriddenUntilUnplugged` as
+   alternative extents. **All inferred, none observed.**
+2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable enable/disable.
+3. **`PUT /devices/evcharger/maxchargingrate`** — breaker max, PIN-gated.
+
+**Open and consequential:** does a plain rate write *itself* create an override?
+If `PUT /v1/customers/devices/settings` — or the legacy `PUT /devices/evcharger`
+this integration already uses — sets `energyManagementOverridden`, then the
+integration has been silently creating three-hour overrides all along, and a
+"local control" switch is nearly free. Resolve it by capturing `loads[]`
+immediately after a rate write.
+
+### Capturing a write
+
+The web app needs no interception. With it open and signed in, hook the request
+paths before acting:
+
+```js
+const of = window.fetch;
+window.fetch = function (input, init) {
+  const url = typeof input === "string" ? input : input && input.url;
+  const method = (init && init.method) || "GET";
+  if (method !== "GET" && /emporiaenergy/.test(url || "")) {
+    (window.__cap ||= []).push({ method, url, body: init && init.body });
+  }
+  return of.apply(this, arguments);
+};
+```
+
+Bodies arrive as a `Uint8Array`, not a string — decode with `TextDecoder`. Hook
+`XMLHttpRequest.prototype.send` too; which transport the build uses varies.
+Never log the `Authorization` header.
+
 ## What this integration does not use
 
 | Gap | Where it lives | Cost to close |
@@ -528,20 +623,9 @@ For reference, the shape PyEmVue still models: `/customers/vehicles` →
 
 ## Still unknown
 
-Override **visibility** is settled (see above). What remains is three write
-contracts, none of which a GET-only probe can capture:
-
-1. **`POST /v1/customers/devices/override`** — the request body. The endpoint
-   requires `device_id`; how the duration is expressed (or whether three hours
-   is fixed server-side) is unknown.
-2. **`POST /v1/customers/energy-monitor/excess-generation`** — the durable
-   Excess Solar enable/disable.
-3. **`PUT /devices/evcharger/maxchargingrate`** — breaker max, PIN-gated.
-
-Also open: whether `PUT /devices/evcharger` with a `chargingRate` — the write
-this integration already makes — itself creates an override, or is simply
-overwritten by the next cloud adjustment. The evidence points at the latter,
-but it has not been tested directly, and testing it means making a write.
+Override **visibility** is settled, and two of the three write contracts are
+now captured (see [Writes](#writes)). What remains is listed under
+[Still uncaptured](#still-uncaptured).
 
 ## Other observations
 

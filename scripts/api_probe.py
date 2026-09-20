@@ -94,12 +94,21 @@ REDACT_VALUE = [
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
 ]
 
-# (label, origin, path, needs) — `needs` names the discovered value this probe
-# requires; the probe is skipped with a reason when it is unavailable.
-#   "devices"  -> comma-joined list of every device id
-#   "evse"     -> a single EV charger device id
-#   "evses"    -> comma-joined list of EV charger device ids
-#   "gid"      -> each Emporia device gid, one request per gid
+# (label, origin, path, needs) — `needs` names the parameter set this probe
+# requires; the probe is skipped with a reason when its inputs are unavailable.
+# Required-parameter names below are quoted from the live 400 responses.
+#
+#   None          -> no parameters
+#   "devices"     -> device_ids = every real device serial, + time window
+#   "device_gids" -> device_gids = every numeric gid, + time window
+#   "evse"        -> device_id  = the EV charger serial (singular), + window
+#   "evses"       -> device_ids = EV charger serials, + window
+#   "evse_only"   -> device_id  = the EV charger serial, no window
+#   "monitor"     -> device_id  = each energy monitor serial, one request each
+#   "gid"         -> each Emporia device gid substituted into the path
+#   "load"        -> loadGid    = each controllable load, one request each
+#   "gids_q"      -> deviceGids = comma-joined numeric gids (legacy spelling)
+#   "tz"          -> timezone   = the account timezone
 PROBES: list[tuple[str, str, str, str | None]] = [
     # --- legacy: what PyEmVue implements, plus the paths it does not ---
     ("legacy customer", LEGACY_ORIGIN, "/customers", None),
@@ -110,11 +119,11 @@ PROBES: list[tuple[str, str, str, str | None]] = [
     ("legacy vehicles", LEGACY_ORIGIN, "/customers/vehicles", None),
     ("legacy location properties", LEGACY_ORIGIN, "/devices/{gid}/locationProperties", "gid"),
     ("legacy time of use", LEGACY_ORIGIN, "/customers/timeofuse", None),
-    ("legacy load management", LEGACY_ORIGIN, "/customers/loadmanagement", None),
+    ("legacy load management", LEGACY_ORIGIN, "/customers/loadmanagement", "load"),
     ("legacy derms", LEGACY_ORIGIN, "/customers/derms", None),
-    ("legacy device schedule", LEGACY_ORIGIN, "/devices/schedule", None),
+    ("legacy device schedule", LEGACY_ORIGIN, "/devices/schedule", "load"),
     ("legacy evcharger max rate", LEGACY_ORIGIN, "/devices/evcharger/maxchargingrate", None),
-    ("legacy firmware up to date", LEGACY_ORIGIN, "/devices/firmwareuptodate", None),
+    ("legacy firmware up to date", LEGACY_ORIGIN, "/devices/firmwareuptodate", "gids_q"),
     # --- v1: account, sites, devices ---
     ("v1 customer", V1_ORIGIN, "/v1/customers", None),
     ("v1 sites", V1_ORIGIN, "/v1/customers/sites", None),
@@ -123,37 +132,40 @@ PROBES: list[tuple[str, str, str, str | None]] = [
     ("v1 device status", V1_ORIGIN, "/v1/customers/devices/status", None),
     ("v1 device channels", V1_ORIGIN, "/v1/customers/devices/channels", None),
     ("v1 device settings", V1_ORIGIN, "/v1/customers/devices/settings", None),
-    ("v1 third party access", V1_ORIGIN, "/v1/customers/devices/third-party-access", None),
+    ("v1 third party access", V1_ORIGIN, "/v1/customers/devices/third-party-access", "evse_only"),
     ("v1 app preferences", V1_ORIGIN, "/v1/customers/app-preferences", None),
-    ("v1 homepage summary", V1_ORIGIN, "/v1/customers/homepage/summary", None),
-    ("v1 homepage monitor card", V1_ORIGIN, "/v1/customers/homepage/monitor-card", None),
-    ("v1 savings", V1_ORIGIN, "/v1/customers/devices/savings", None),
+    ("v1 homepage summary", V1_ORIGIN, "/v1/customers/homepage/summary", "devices"),
+    ("v1 homepage monitor card", V1_ORIGIN, "/v1/customers/homepage/monitor-card", "devices"),
+    ("v1 savings", V1_ORIGIN, "/v1/customers/devices/savings", "tz"),
     # --- v1: the one that matters most ---
-    ("v1 device override", V1_ORIGIN, "/v1/customers/devices/override", None),
+    ("v1 device override", V1_ORIGIN, "/v1/customers/devices/override", "evse_only"),
     # --- v1: energy management controllers ---
     ("v1 excess generation", V1_ORIGIN, "/v1/customers/excess-generation", None),
-    ("v1 excess generation monitor", V1_ORIGIN, "/v1/customers/energy-monitor/excess-generation", None),
+    ("v1 excess generation monitor", V1_ORIGIN, "/v1/customers/energy-monitor/excess-generation", "monitor"),
     ("v1 power smart", V1_ORIGIN, "/v1/customers/power-smart", None),
-    ("v1 power smart monitor", V1_ORIGIN, "/v1/customers/energy-monitor/power-smart", None),
+    ("v1 power smart monitor", V1_ORIGIN, "/v1/customers/energy-monitor/power-smart", "monitor"),
     ("v1 peak demand", V1_ORIGIN, "/v1/customers/peak-demand", None),
-    ("v1 peak demand monitor", V1_ORIGIN, "/v1/customers/energy-monitor/peak-demand", None),
+    ("v1 peak demand monitor", V1_ORIGIN, "/v1/customers/energy-monitor/peak-demand", "monitor"),
     ("v1 load sharing", V1_ORIGIN, "/v1/customers/load-sharing", None),
     ("v1 load sharings", V1_ORIGIN, "/v1/customers/load-sharings", None),
     ("v1 derms", V1_ORIGIN, "/v1/customers/derms", None),
-    ("v1 derms devices", V1_ORIGIN, "/v1/derms/devices", None),
+    ("v1 derms devices", V1_ORIGIN, "/v1/derms/devices", "devices"),
     # --- v1: EV charging ---
     ("v1 evses", V1_ORIGIN, "/v1/devices/evses", "evses"),
     ("v1 evse sessions", V1_ORIGIN, "/v1/devices/evses/sessions", "evses"),
-    ("v1 evse charging history", V1_ORIGIN, "/v1/customers/evse/charging-history", "evses"),
+    ("v1 evse charging history", V1_ORIGIN, "/v1/customers/evse/charging-history", "evse"),
     ("v1 ev charging report", V1_ORIGIN, "/v1/customers/ev-charging-report", "evse"),
     ("v1 vehicle brands", V1_ORIGIN, "/v1/vehicles/brands", None),
     # --- v1: rates and misc ---
     ("v1 utility rates", V1_ORIGIN, "/v1/utility-rates", None),
-    ("v1 device utility rates", V1_ORIGIN, "/v1/devices/utility-rates", None),
+    ("v1 device utility rates", V1_ORIGIN, "/v1/devices/utility-rates", "evse_only"),
     ("v1 rate analysis", V1_ORIGIN, "/v1/customers/rate-analysis", None),
     ("v1 recommendations", V1_ORIGIN, "/v1/customers/recommendations", None),
-    ("v1 device usages", V1_ORIGIN, "/v1/customers/devices/usages", "devices"),
+    ("v1 device usages", V1_ORIGIN, "/v1/customers/devices/usages", "device_gids"),
 ]
+
+# Probes that issue one request per discovered value rather than one in total.
+PER_VALUE_NEEDS = {"gid", "monitor", "load"}
 
 
 def scrub_text(value: str) -> str:
@@ -240,37 +252,76 @@ def authenticate(args: argparse.Namespace) -> PyEmVue:
 
 def discover(vue: PyEmVue) -> dict[str, Any]:
     """Pull the identifiers the parameterised probes need."""
-    found: dict[str, Any] = {"gids": [], "device_ids": [], "evse_ids": []}
+    found: dict[str, Any] = {
+        "gids": [],
+        "device_ids": [],
+        "evse_ids": [],
+        "monitor_ids": [],
+        "load_gids": [],
+        "timezone": None,
+    }
     try:
         devices = vue.get_devices()
     except Exception as err:  # noqa: BLE001 - discovery is best-effort
         print(f"  ! device discovery failed: {err}")
         return found
+
     for device in devices:
         if device.device_gid and device.device_gid not in found["gids"]:
             found["gids"].append(device.device_gid)
+
+        # Nested "SX…" entries are the monitor's own CT sub-device, not a
+        # device the API accepts in device_ids. Skip them.
         serial = getattr(device, "manufacturer_id", None)
-        if serial:
+        if not serial or serial.startswith("SX"):
+            continue
+        if serial not in found["device_ids"]:
             found["device_ids"].append(serial)
-            if device.ev_charger:
-                found["evse_ids"].append(serial)
+
+        if device.ev_charger:
+            found["evse_ids"].append(serial)
+            load = getattr(device.ev_charger, "load_gid", None)
+            if load:
+                found["load_gids"].append(load)
+        elif device.outlet:
+            load = getattr(device.outlet, "load_gid", None)
+            if load:
+                found["load_gids"].append(load)
+        else:
+            found["monitor_ids"].append(serial)
+
+        if not found["timezone"]:
+            found["timezone"] = getattr(device, "time_zone", None) or None
+
     return found
 
 
-def build_params(need: str | None, found: dict[str, Any], days: int) -> dict[str, str] | None:
+def build_params(
+    need: str | None, found: dict[str, Any], days: int, value: Any = None
+) -> dict[str, str] | None:
     """Return query params for a probe, or None when its inputs are missing."""
     if need is None:
         return {}
+
     end = dt.datetime.now(dt.timezone.utc)
     start = end - dt.timedelta(days=days)
     window = {
         "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
     if need == "devices":
         if not found["device_ids"]:
             return None
         return {"device_ids": ",".join(found["device_ids"]), **window}
+    if need == "device_gids":
+        if not found["gids"]:
+            return None
+        return {"device_gids": ",".join(str(g) for g in found["gids"]), **window}
+    if need == "gids_q":
+        if not found["gids"]:
+            return None
+        return {"deviceGids": ",".join(str(g) for g in found["gids"])}
     if need == "evses":
         if not found["evse_ids"]:
             return None
@@ -279,6 +330,20 @@ def build_params(need: str | None, found: dict[str, Any], days: int) -> dict[str
         if not found["evse_ids"]:
             return None
         return {"device_id": found["evse_ids"][0], **window}
+    if need == "evse_only":
+        if not found["evse_ids"]:
+            return None
+        return {"device_id": found["evse_ids"][0]}
+    if need == "tz":
+        if not found["timezone"]:
+            return None
+        return {"timezone": found["timezone"]}
+    if need == "monitor":
+        return None if value is None else {"device_id": value}
+    if need == "load":
+        return None if value is None else {"loadGid": str(value)}
+    if need == "gid":
+        return {}
     return {}
 
 
@@ -343,20 +408,36 @@ def run(args: argparse.Namespace) -> int:
     results.append(unauth)
 
     for name, origin, path, need in PROBES:
-        params = build_params(need, found, args.days)
-        if params is None:
+        if need in PER_VALUE_NEEDS:
+            targets = {
+                "gid": found["gids"],
+                "monitor": found["monitor_ids"],
+                "load": found["load_gids"],
+            }[need]
+        else:
+            targets = [None]
+
+        if not targets:
             results.append(
                 {"name": name, "origin": origin, "path": path,
-                 "skipped": f"no discovered value for '{need}'"}
+                 "skipped": f"nothing discovered for '{need}'"}
             )
             print(f"  -  {name}: skipped (no {need})")
             continue
 
-        targets = found["gids"] if need == "gid" else [None]
-        for gid in targets:
-            real_path = path.replace("{gid}", str(gid)) if gid is not None else path
+        for value in targets:
+            params = build_params(need, found, args.days, value)
+            if params is None:
+                results.append(
+                    {"name": name, "origin": origin, "path": path,
+                     "skipped": f"no discovered value for '{need}'"}
+                )
+                print(f"  -  {name}: skipped (no {need})")
+                break
+
+            real_path = path.replace("{gid}", str(value)) if need == "gid" else path
             record = probe(session, origin, real_path, params, id_token)
-            record["name"] = name if gid is None else f"{name} [{gid}]"
+            record["name"] = name if value is None else f"{name} [{value}]"
             results.append(record)
             status = record.get("status", record.get("error", "?"))
             print(f"  {status}  {record['name']}  ({record.get('elapsed_ms', '?')} ms)")
