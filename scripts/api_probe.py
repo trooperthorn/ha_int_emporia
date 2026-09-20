@@ -584,13 +584,19 @@ def run_diff(before_path: str, after_path: str) -> int:
 
 CONTROL_PATH = "/v1/customers/evse/control"
 
-# Observed on the wire, versus enum-shaped strings found in the app binary.
+# Three confidence levels, deliberately kept apart:
+#   OBSERVED  — captured leaving the official app, so both the value and its
+#               meaning are known.
+#   ACCEPTED  — we sent it and the API answered 200 rather than 400, so the
+#               enum member is real; what it *does* is still unproven.
+#   CANDIDATE — an enum-shaped string from the app binary, never sent.
 OBSERVED_COMMANDS = {"TURN_ON", "TURN_OFF"}
+ACCEPTED_COMMANDS = {"CHARGE_AT_FULL_POWER"}
 CANDIDATE_COMMANDS = {
-    "CHARGE_AT_FULL_POWER", "CHARGE_WITH_EXCESS_SOLAR", "CHARGE_NOW",
-    "CHARGE_BOOST", "CHARGE_TO_STATE_OF_CHARGE", "CHARGE_DURING_PEAK",
-    "PAUSE", "RESUME",
+    "CHARGE_WITH_EXCESS_SOLAR", "CHARGE_NOW", "CHARGE_BOOST",
+    "CHARGE_TO_STATE_OF_CHARGE", "CHARGE_DURING_PEAK", "PAUSE", "RESUME",
 }
+KNOWN_COMMANDS = OBSERVED_COMMANDS | ACCEPTED_COMMANDS | CANDIDATE_COMMANDS
 
 
 def read_load_state(session: requests.Session, id_token: str) -> Any:
@@ -603,9 +609,10 @@ def read_load_state(session: requests.Session, id_token: str) -> Any:
 def run_send_command(args: argparse.Namespace) -> int:
     """POST one command to the EVSE control endpoint, with before/after state."""
     command = args.send_command.strip().upper()
-    if command not in OBSERVED_COMMANDS | CANDIDATE_COMMANDS:
+    if command not in KNOWN_COMMANDS:
         print(f"Unknown command {command!r}. Known values:")
         print("  observed:  " + ", ".join(sorted(OBSERVED_COMMANDS)))
+        print("  accepted:  " + ", ".join(sorted(ACCEPTED_COMMANDS)))
         print("  candidate: " + ", ".join(sorted(CANDIDATE_COMMANDS)))
         print("Pass --force-command to send it anyway.")
         if not args.force_command:
@@ -641,9 +648,12 @@ def run_send_command(args: argparse.Namespace) -> int:
         )
 
     body = {"device_id": device_id, "command": command}
-    print(f"\nAbout to send:\n  POST {LEGACY_ORIGIN}{CONTROL_PATH}\n  {json.dumps(body)}")
-    if command not in OBSERVED_COMMANDS:
-        print("  NOTE: this command value has never been observed on the wire.")
+    print(f"\nAbout to send  >>> {command} <<<")
+    print(f"  POST {LEGACY_ORIGIN}{CONTROL_PATH}\n  {json.dumps(body)}")
+    if command in ACCEPTED_COMMANDS:
+        print("  NOTE: the API accepts this value, but its effect is unproven.")
+    elif command not in OBSERVED_COMMANDS:
+        print("  NOTE: this command value has never been sent or observed.")
     print("\nThis changes your EV charger.")
 
     if not args.yes and input('Type "yes" to send: ').strip().lower() != "yes":
