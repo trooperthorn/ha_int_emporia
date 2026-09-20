@@ -47,8 +47,10 @@ schedule enabled, to separate the controllers.
 Sending a command
 -----------------
 `POST /v1/customers/evse/control` takes `{"device_id": ..., "command": ...}`.
-`TURN_ON` and `TURN_OFF` are observed; the rest are enum-shaped strings lifted
-from the app binary and are **unverified guesses** until someone sends one.
+`ChargerControlCommand` has exactly three members — `TURN_ON`, `TURN_OFF` and
+`CHARGE_AT_FULL_POWER` — established with `--discover-commands`, which maps the
+enum without executing anything. There is no command that releases an
+energy-management override.
 
     python scripts/api_probe.py --token-file ~/.emporia-probe.json \
         --send-command CHARGE_AT_FULL_POWER
@@ -153,7 +155,7 @@ PROBES: list[tuple[str, str, str, str | None]] = [
     ("v1 homepage summary", V1_ORIGIN, "/v1/customers/homepage/summary", "devices"),
     ("v1 homepage monitor card", V1_ORIGIN, "/v1/customers/homepage/monitor-card", "devices"),
     ("v1 savings", V1_ORIGIN, "/v1/customers/devices/savings", "tz"),
-    # --- v1: the one that matters most ---
+    # --- v1: batteries only, despite the generic path ---
     ("v1 device override", V1_ORIGIN, "/v1/customers/devices/override", "evse_only"),
     # --- v1: energy management controllers ---
     ("v1 excess generation", V1_ORIGIN, "/v1/customers/excess-generation", None),
@@ -592,10 +594,7 @@ CONTROL_PATH = "/v1/customers/evse/control"
 #   CANDIDATE — an enum-shaped string from the app binary, never sent.
 OBSERVED_COMMANDS = {"TURN_ON", "TURN_OFF"}
 ACCEPTED_COMMANDS = {"CHARGE_AT_FULL_POWER"}
-CANDIDATE_COMMANDS = {
-    "CHARGE_WITH_EXCESS_SOLAR", "CHARGE_NOW", "CHARGE_BOOST",
-    "CHARGE_TO_STATE_OF_CHARGE", "CHARGE_DURING_PEAK", "PAUSE", "RESUME",
-}
+CANDIDATE_COMMANDS: set[str] = set()
 KNOWN_COMMANDS = OBSERVED_COMMANDS | ACCEPTED_COMMANDS | CANDIDATE_COMMANDS
 
 # Rejected outright: 400 "Unexpected value" from ChargerControlCommand.
@@ -604,16 +603,22 @@ REJECTED_COMMANDS = {"CHARGE_WITH_EXCESS_SOLAR"}
 # Values to test for enum membership with --discover-commands. Drawn from
 # enum-shaped strings in the app binary plus obvious naming variants.
 ENUM_CANDIDATES = [
-    "TURN_ON", "TURN_OFF",
-    "CHARGE_AT_FULL_POWER", "CHARGE_NOW", "CHARGE_BOOST",
-    "CHARGE_TO_STATE_OF_CHARGE", "CHARGE_DURING_PEAK", "CHARGE",
-    "PAUSE", "RESUME", "STOP", "START",
+    # Confirmed members.
+    "TURN_ON", "TURN_OFF", "CHARGE_AT_FULL_POWER",
+    # Confirmed non-members, kept so a future API change shows up as a change.
+    "CHARGE_NOW", "CHARGE_BOOST", "CHARGE_TO_STATE_OF_CHARGE",
+    "CHARGE_DURING_PEAK", "CHARGE", "PAUSE", "RESUME", "STOP", "START",
     "CHARGE_WITH_EXCESS_SOLAR", "EXCESS_SOLAR", "OVERRIDE_EXCESS_SOLAR",
     "OVERRIDE_PEAK_DEMAND_CHARGE_OR_PAUSE", "OVERRIDE_PEAK_DEMAND_RESUME",
     "OVERRIDE_UTILITY", "MANUAL_ECO",
     "CLEAR_OVERRIDE", "END_OVERRIDE", "CANCEL_OVERRIDE", "REMOVE_OVERRIDE",
     "RESUME_ENERGY_MANAGEMENT", "RESUME_SCHEDULE", "AUTO", "AUTOMATIC",
     "SMART_CHARGING", "ECO", "DEFAULT", "NONE",
+    # Second sweep: naming variants for a release/full-power action.
+    "FULL_POWER", "CHARGE_AT_MAX_POWER", "CHARGE_AT_FULL_SPEED", "FULL_SPEED",
+    "MAX_POWER", "MAX", "BOOST", "UNPAUSE", "ON", "OFF", "ENABLE", "DISABLE",
+    "RESET", "CANCEL", "OVERRIDE", "SCHEDULE", "SOLAR", "SMART", "GREEN",
+    "ENERGY_MANAGEMENT", "RESUME_AUTOMATION", "CHARGE_IMMEDIATELY",
 ]
 
 # Substring of the Jackson error that means "not a member of the enum".

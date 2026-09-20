@@ -636,35 +636,47 @@ BoringSSL with a compiled-in root store and ignores Android's user CA store.
    `EXCESS_SOLAR_PAUSED`, `PEAK_DEMAND_PAUSED`, `WAITING_FOR_SOLAR`,
    `MANUALLY_STOPPED`, `PREVENTED_CHARGING`.
 
-   **`CHARGE_AT_FULL_POWER` is a real enum member** (V-live): the endpoint
-   answers `200` with an empty body. **`CHARGE_WITH_EXCESS_SOLAR` is not**:
+   **`ChargerControlCommand` has exactly three members** (V-live). Established
+   with `scripts/api_probe.py --discover-commands`, which maps the enum without
+   executing anything — 31 candidates tested, 3 accepted:
 
-   ```json
-   {"error_code": "OTHER",
-    "error_message": "JSON parse error: Cannot construct instance of
-      `com.emporiaenergy.api.openapi.model.ChargerControlCommand`,
-      problem: Unexpected value 'CHARGE_WITH_EXCESS_SOLAR'"}
-   ```
+   | Member | Meaning |
+   | --- | --- |
+   | `TURN_ON` | resume / offer charge — **observed** from the web app |
+   | `TURN_OFF` | pause — **observed** from the web app |
+   | `CHARGE_AT_FULL_POWER` | accepted (`200`, empty body); effect unproven |
 
-   That error is more useful than it looks. It names the enum
-   (`ChargerControlCommand`), confirms an OpenAPI-generated Jackson model
-   behind the API, and — because the body is deserialized *before* it is
-   validated — provides a **side-effect-free membership oracle**:
+   Rejected with `400 "Unexpected value"`: `CHARGE_NOW`, `CHARGE_BOOST`,
+   `CHARGE_TO_STATE_OF_CHARGE`, `CHARGE_DURING_PEAK`, `CHARGE_WITH_EXCESS_SOLAR`,
+   `PAUSE`, `RESUME`, `START`, `STOP`, `OVERRIDE_EXCESS_SOLAR`,
+   `OVERRIDE_PEAK_DEMAND_*`, `OVERRIDE_UTILITY`, `CLEAR_OVERRIDE`,
+   `END_OVERRIDE`, `CANCEL_OVERRIDE`, `REMOVE_OVERRIDE`,
+   `RESUME_ENERGY_MANAGEMENT`, `RESUME_SCHEDULE`, `AUTO`, `SMART_CHARGING`,
+   and others.
 
-   > A request carrying a `command` but **no `device_id`** fails either at JSON
-   > parse (value not in the enum) or later on the missing device (value is in
-   > the enum). Neither path reaches a charger.
+   ### There is no release command
 
-   `scripts/api_probe.py --discover-commands` uses exactly that to map the enum
-   without executing anything. It verifies the oracle first — a known-good and
-   a nonsense value must fail in visibly different ways — and aborts if they
-   do not.
+   That absence is the finding. Nothing in the enum hands control back to an
+   energy-management controller, and the app offers no such button either — its
+   "Manage Charging" sheet is *Charge at full power / Pause charging / Cancel*,
+   where Cancel merely dismisses. The three enum members and the three UI
+   actions correspond exactly.
 
-   What `CHARGE_AT_FULL_POWER` actually *does* is still unproven: both sends
-   happened while an override was already running, so the command requested a
-   state the charger was already in. `loads[]` did not change and the window did
-   not restart, which rules out "every send opens a fresh override" but is
-   equally consistent with an idempotent create.
+   **An override therefore ends by expiring**, not by being cancelled. The
+   three-hour window in `energyManagementText` is the whole mechanism. Any HA
+   feature that takes control must be designed around a timed lease it cannot
+   shorten, not around an acquire/release pair.
+
+   The remaining unknown is narrow: whether `CHARGE_AT_FULL_POWER` is what
+   *opens* that window. Both sends so far happened while an override was
+   already running, so the command requested a state the charger was already
+   in; `loads[]` did not change and the window did not restart. Testing it from
+   a clean state — after an override lapses — settles it.
+
+   The membership oracle, worth keeping: the control endpoint deserializes the
+   body before validating it, so a request carrying a `command` but **no
+   `device_id`** fails at JSON parse when the value is not in the enum, and on
+   the missing device when it is. Neither path reaches a charger.
 
 2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable
    enable/disable. The **read** side is now captured (see the Energy management
