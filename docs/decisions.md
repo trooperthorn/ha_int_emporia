@@ -97,3 +97,43 @@ through `serialx` on 2026-09-06. The manifest now declares `boto3>=1.42.97,<2`. 
 reproducibility argument of the earlier entry does not hold: on any given core the
 constraint file fixes the version, so a range resolves to the same release every time.
 Rejected: keeping the exact pin and bumping it after each core release.
+
+## 2026-09-20: the write guard warns by default rather than blocking
+
+Emporia's cloud writes the same `chargingRate` field this integration writes,
+and keeps re-writing it while an energy-management feature is active (see
+[api-reference.md](api-reference.md)). A setpoint written from Home Assistant
+during that period is likely to be discarded within the minute.
+
+The integration now detects that and, by default, **still performs the write**
+and logs a warning naming the feature that owns the rate. Blocking is available
+behind the `block_contended_writes` option.
+
+Blocking by default was rejected. It would change the behaviour of every
+existing automation on upgrade, turning a write that previously appeared to
+succeed into a raised `HomeAssistantError` — a silent no-op becoming a loud
+failure is an improvement, but not one to impose without consent. There is also
+a legitimate reason to write while contended: the value is still the ceiling the
+controller modulates underneath, so setting it is not meaningless, merely not
+authoritative.
+
+The actionable signal lives in the `Cloud Managed` binary sensor, so automations
+can avoid the contention rather than discover it.
+
+## 2026-09-20: `loads[]` is read by issuing the request directly
+
+`VueDeviceStatusCoordinator` no longer calls `PyEmVue.get_devices_status()`. That
+helper parses `outlets`, `evChargers` and `devicesConnected` out of the response
+and discards the `loads` array, which is the only place Emporia reports which
+energy-management feature owns a load and whether an override is suppressing it.
+
+The coordinator issues the same single request through `vue.auth.request()` —
+which keeps PyEmVue's token refresh and retry behaviour — and parses all four
+keys itself. The API request count is unchanged.
+
+Rejected: forking PyEmVue to add `loads` to its model. It would put a
+first-party fork in the dependency chain for one field, and this integration
+already carries a documented plan to replace PyEmVue with a direct client.
+
+Rejected: a second request to the same endpoint for the loads data alone. It
+would double the poll rate against an undocumented cloud API for no benefit.

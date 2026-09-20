@@ -756,7 +756,22 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
 
 class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator for outlet/EV charger device status."""
+    """Coordinator for outlet/EV charger device status.
+
+    Issues the raw request rather than calling `PyEmVue.get_devices_status()`,
+    because that helper parses `outlets`, `evChargers` and `devicesConnected`
+    out of the response and discards the `loads` array. `loads` is the only
+    place Emporia reports which energy-management feature currently owns a
+    load's charging rate, and whether a manual override is suppressing it.
+    See docs/api-reference.md.
+
+    The request count is unchanged: this is the same single endpoint the
+    helper would have called.
+    """
+
+    #: Latest `loads[]` entries, keyed by loadGid. Replaced only on a
+    #: successful fetch, so it survives the last-known-good path below.
+    loads: dict[int, dict[str, Any]]
 
     def __init__(self, hass: HomeAssistant, vue: PyEmVue) -> None:
         """Initialize the device status coordinator."""
@@ -767,24 +782,40 @@ class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(minutes=1),
         )
         self.vue = vue
+        self.loads = {}
+
+    def _fetch_status(self) -> dict[str, Any]:
+        """Blocking: GET the device-status endpoint and return the raw body."""
+        response = self.vue.auth.request("get", "customers/devices/status")
+        response.raise_for_status()
+        return response.json() if response.text else {}
+
+    def load_for(self, charger: ChargerDevice | None) -> dict[str, Any] | None:
+        """Return the `loads[]` entry belonging to a charger, if reported."""
+        load_gid = getattr(charger, "load_gid", None)
+        if not load_gid:
+            return None
+        return self.loads.get(int(load_gid))
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch device status (outlets and chargers)."""
+        """Fetch device status (outlets, chargers and load management)."""
         try:
             data: dict[str, Any] = {}
-            outlets: list[OutletDevice]
-            chargers: list[ChargerDevice]
 
-            outlets, chargers = await self.hass.async_add_executor_job(
-                self.vue.get_devices_status
-            )
+            raw = await self.hass.async_add_executor_job(self._fetch_status)
 
-            if outlets:
-                for outlet in outlets:
-                    data[str(outlet.device_gid)] = outlet
-            if chargers:
-                for charger in chargers:
-                    data[str(charger.device_gid)] = charger
+            for raw_outlet in raw.get("outlets") or []:
+                outlet = OutletDevice().from_json_dictionary(raw_outlet)
+                data[str(outlet.device_gid)] = outlet
+            for raw_charger in raw.get("evChargers") or []:
+                charger = ChargerDevice().from_json_dictionary(raw_charger)
+                data[str(charger.device_gid)] = charger
+
+            self.loads = {
+                int(entry["loadGid"]): entry
+                for entry in raw.get("loads") or []
+                if entry.get("loadGid") is not None
+            }
             return data
         except Exception as err:
             if self.data:

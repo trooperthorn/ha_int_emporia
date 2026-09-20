@@ -10,3 +10,7 @@
 
 !/.vscode/settings.json
 !/.vscode/launch.json
+
+# api_probe.py captures — keep account data out of the repo
+emporia-probe-*.json
+emporia-probe-*.log

@@ -17,6 +17,7 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import selector
 
 from .const import (
+    BLOCK_CONTENDED_WRITES,
     AUTH_METHOD,
     AUTH_METHOD_EMAIL_PASSWORD,
     AUTH_METHOD_SCHEMA,
@@ -396,6 +397,10 @@ class EmporiaVueOptionsFlowHandler(config_entries.OptionsFlow):
                         multiple=False,
                     )
                 ),
+                vol.Optional(
+                    BLOCK_CONTENDED_WRITES,
+                    default=options.get(BLOCK_CONTENDED_WRITES, False),
+                ): selector.BooleanSelector(),
                 vol.Optional(
                     "battery_capacity_kwh",
                     default=options.get("battery_capacity_kwh", 80.0),

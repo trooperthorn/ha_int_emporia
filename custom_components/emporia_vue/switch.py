@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from .charger_entity import EmporiaChargerEntity
 from .const import DOMAIN
+from .write_guard import check_contended_write
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class EmporiaChargerSwitch(EmporiaChargerEntity, SwitchEntity):  # type: ignore
 
     async def _update_switch(self, on: bool) -> None:
         """Update the switch, preserving the currently-set charging current."""
+        check_contended_write(self, "charger on/off")
         charger = self.coordinator.data[self._device_gid]
         try:
             await self.hass.async_add_executor_job(

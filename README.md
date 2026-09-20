@@ -10,7 +10,7 @@ Emporia API and device facts, and dated design decisions.
 
 Note: This project is not associated with or endorsed by Emporia Energy.
 
-Data is pulled from the Emporia API using the [PyEmVue python module](https://github.com/magico13/PyEmVue), also written by me.
+Data is pulled from the Emporia API using the [PyEmVue python module](https://github.com/magico13/PyEmVue).
 
 ![ha_example](images/ha_example.png)
 
@@ -25,7 +25,7 @@ Setting up a custom repository is done by:
 1. Go into HACS from the side bar.
 2. Click into Integrations.
 3. Click the 3-dot menu in the top right and select `Custom repositories`
-4. In the UI that opens, copy and paste the [url for this github repo](https://github.com/magico13/ha-emporia-vue) into the `Add custom repository URL` field.
+4. In the UI that opens, copy and paste `https://github.com/trooperthorn/ha_int_emporia` into the `Add custom repository URL` field.
 5. Set the category to `Integration`.
 6. Click the `Add` button.
 7. Select Emporia Vue from the list and press the download button.
@@ -72,6 +72,7 @@ The integration's **Configure** button (separate from reconfigure) also exposes:
 |---|---|
 | **Vehicle SoC sensor** (`vehicle_soc_sensor`) | An existing HA sensor entity reporting your EV's state of charge (%). When set, an "EV Charge Time Needed" sensor is created for each EV charger, estimating hours remaining to reach 100% at the currently configured charging current. |
 | **Battery capacity (kWh)** (`battery_capacity_kwh`) | Your vehicle's usable battery capacity, used for the charge-time estimate above. Defaults to 80 kWh. |
+| **Block writes while cloud-managed** (`block_contended_writes`) | Refuse charging-rate and on/off writes while an Emporia cloud feature owns the charging rate, instead of sending them to be overwritten. Defaults to off, which writes anyway and logs a warning. See [EV charging](#ev-charging-who-actually-owns-the-charging-rate). |
 
 ### Actions
 
@@ -127,6 +128,97 @@ This section breaks down where the power consumed by your house is actually goin
 1. **Always use the `(1D)` sensors:** The Energy Dashboard requires sensors that track total accumulated energy over time (kWh). If you attempt to use the `(1MIN)` power (Watt) sensors, the dashboard will reject them.
 2. **Wait 2 Hours:** Home Assistant’s Long-Term Statistics engine only compiles Energy Dashboard data once an hour. After configuring this, the dashboard will remain blank or show incomplete data for up to two hours while the database builds its first baseline.
 3. **Do not duplicate Mains:** Never add the raw Mains sensors to the "Individual Devices" list. Home Assistant automatically calculates your total home consumption mathematically (`Grid Import` + `Solar Production` - `Grid Export`). If you add Mains to the device list, your dashboard will double-count your entire house's consumption.
+
+## EV charging: who actually owns the charging rate
+
+This is the part of the integration that differs most from a plain "read the
+sensors, write the setpoint" custom component, and it is worth reading before
+automating your charger.
+
+**Emporia's cloud writes the same field this integration writes.** When one of
+Emporia's energy-management features is running — Excess Solar, Peak Demand or a
+schedule — it adjusts `chargingRate`, which is the exact field behind the
+**Current Limit** number entity and the `emporia_vue.set_charger_current` action.
+It is not two settings that coexist. It is one setting with two writers, and the
+cloud writes far more often: a live capture recorded the rate moving
+35 A → 33 A → 35 A within 90 seconds.
+
+So a value you set from Home Assistant during that period is likely to be
+discarded within the minute, and nothing in the API tells you it was.
+
+### The entities that make it visible
+
+| Entity | What it tells you |
+| --- | --- |
+| **Cloud Managed** (`binary_sensor`) | `on` while an Emporia feature owns the rate. Gate rate writes on this being `off`. |
+| **Energy Management** (`sensor`) | Which feature owns it: `Excess Solar`, `Peak Demand`, `Schedule`, `Manual`, or `Overridden`. |
+| **Status** (`sensor`) | Charger state as a four-value enum plus an IEC 61851 code. |
+| **Current Limit** (`number`) | The rate ceiling. Writable — but see above. |
+
+Both new entities carry the detail Emporia supplies, as attributes:
+`status_text` (e.g. *"Charging with Excess Solar since 10:17 am."*),
+`next_scheduled_event`, `warning`, and the individual `excess_solar_enabled` /
+`peak_demand_enabled` / `schedules_enabled` / `overridden` flags.
+
+They come from a `loads[]` array that Emporia already returns on the endpoint
+this integration polls every 60 seconds, and which PyEmVue parses past and
+discards. Surfacing them costs no extra API calls.
+
+### Overrides are a lease you cannot cancel
+
+Emporia's app has a **Charge at full power** button. It opens a **three-hour
+override**: the feature stays configured but stops adjusting the rate, which is
+released to the maximum. While that runs, `Energy Management` reads `Overridden`
+and `Cloud Managed` reads `off`, because nothing is contending for the setpoint.
+
+There is no way to end an override early. The charger's control API accepts
+exactly three commands — `TURN_ON`, `TURN_OFF` and `CHARGE_AT_FULL_POWER` — and
+none of them hands control back. An override ends by expiring. Design around a
+timed lease, not an acquire/release pair.
+
+The expiry is only ever stated in prose, inside `status_text`
+(*"Overridden from 11:40 am to 2:40 pm."*). There is no structured expiry field
+on either of Emporia's API hosts, so the integration exposes that string as-is
+rather than parsing times out of wording Emporia is free to change.
+
+### Writing anyway
+
+By default a contended write still goes through, and logs a warning naming the
+feature that owns the rate. Nothing about your existing automations changes when
+you upgrade.
+
+Enable **Block writes while cloud-managed** in the integration options
+(**Settings → Devices & Services → Emporia Vue → Configure**) to refuse those
+writes with an error instead, so an automation fails loudly rather than
+silently having no effect.
+
+### A pattern that works
+
+```yaml
+- alias: Set charging current, but only when it will stick
+  triggers:
+    - trigger: state
+      entity_id: input_number.set_charging_rate
+  conditions:
+    - condition: state
+      entity_id: binary_sensor.ev_charger_cloud_managed
+      state: "off"
+  actions:
+    - action: number.set_value
+      target:
+        entity_id: number.ev_charger_current_limit
+      data:
+        value: "{{ trigger.to_state.state | int }}"
+```
+
+If you want Home Assistant to own charging outright, turn Emporia's features off
+for that charger in the Emporia app rather than fighting them from HA. The
+integration cannot do that for you — enabling and disabling those features is
+not something the API exposes to third parties today.
+
+See [docs/api-reference.md](docs/api-reference.md) for the endpoints, payloads
+and evidence behind everything above, including which parts are verified against
+a live account and which are not.
 
 ## Automation Blueprints
 
