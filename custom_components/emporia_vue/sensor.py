@@ -1,6 +1,5 @@
 """Platform for sensor integration."""
 
-from datetime import datetime
 import logging
 from typing import Any
 
@@ -29,6 +28,11 @@ from .const import (
     MAINS_CHANNEL_NUMS,
     MAINS_COMBINED_CHANNEL_NUM,
     MAINS_SPLIT_CHANNELS,
+)
+from .energy_management import (
+    ENERGY_MANAGEMENT_STATES,
+    attributes,
+    controller,
 )
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -183,6 +187,11 @@ async def async_setup_entry(
 
                 all_entities.append(
                     EmporiaChargerStatusSensor(coordinator_device_status, device_obj)
+                )
+                all_entities.append(
+                    EmporiaChargerEnergyManagementSensor(
+                        coordinator_device_status, device_obj
+                    )
                 )
 
     async_add_entities(all_entities)
@@ -435,6 +444,67 @@ class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: igno
     def unique_id(self) -> str:
         """Unique ID for the charger status sensor."""
         return f"emporia_vue.charger_status_{self._device_gid}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return the device information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"{self._device_gid}-1,2,3")},
+            name=self._device.device_name,
+            model=self._device.model,
+            sw_version=self._device.firmware,
+            manufacturer="Emporia",
+        )
+
+
+class EmporiaChargerEnergyManagementSensor(CoordinatorEntity, SensorEntity):  # type: ignore
+    """Which Emporia cloud feature currently owns the charging rate.
+
+    Reads the `loads[]` array that `GET /customers/devices/status` returns and
+    PyEmVue discards. `overridden` takes precedence over the individual feature
+    flags: while an override runs, no controller is applying its own rate even
+    though it stays configured.
+
+    The override's expiry is only ever stated in the `status_text` attribute's
+    prose, so that text is exposed verbatim rather than parsed — see
+    docs/api-reference.md.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "energy_management"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ENERGY_MANAGEMENT_STATES
+    _attr_icon = "mdi:transmission-tower"
+
+    def __init__(self, coordinator, device: VueDevice) -> None:
+        """Initialize the energy-management sensor."""
+        super().__init__(coordinator)
+        self._device = device
+        self._device_gid = str(device.device_gid)
+
+    @property
+    def _load(self) -> dict[str, Any] | None:
+        return self.coordinator.load_for(self.coordinator.data.get(self._device_gid))
+
+    @property
+    def available(self) -> bool:
+        """Unavailable when Emporia reports no load-management entry at all."""
+        return super().available and self._load is not None
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the controller that owns the rate."""
+        return controller(self._load)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the detail Emporia supplies alongside the flags."""
+        return attributes(self._load)
+
+    @property
+    def unique_id(self) -> str:
+        """Unique ID for the energy-management sensor."""
+        return f"emporia_vue.charger_energy_management_{self._device_gid}"
 
     @property
     def device_info(self) -> DeviceInfo:

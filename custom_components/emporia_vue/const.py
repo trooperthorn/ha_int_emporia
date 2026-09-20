@@ -20,6 +20,12 @@ SOLAR_INVERT = "solar_invert"
 CUSTOMER_GID = "customer_gid"
 CONFIG_TITLE = "title"
 
+# Options key. When true, a rate/on-off write is refused while an Emporia
+# cloud feature owns the charging rate, instead of being sent and silently
+# overwritten. Defaults to false so enabling the option is a deliberate
+# behaviour change rather than a surprise on upgrade.
+BLOCK_CONTENDED_WRITES = "block_contended_writes"
+
 # Channel numbers that represent the physical Mains/Grid CTs on a Vue unit,
 # rather than a monitored branch circuit. Per-channel sensors for these are
 # always created and always default-enabled regardless of ENABLE_1M/1D/1MON.

@@ -3,5 +3,20 @@
     "set_charger_current": {
       "service": "mdi:ev-station"
     }
+  },
+  "entity": {
+    "sensor": {
+      "energy_management": {
+        "default": "mdi:transmission-tower"
+      }
+    },
+    "binary_sensor": {
+      "cloud_managed": {
+        "default": "mdi:cloud-sync",
+        "state": {
+          "off": "mdi:cloud-off-outline"
+        }
+      }
+    }
   }
 }

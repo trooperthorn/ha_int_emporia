@@ -39,6 +39,11 @@ class EmporiaChargerEntity(CoordinatorEntity):
         self._attr_name = None
 
     @property
+    def device_gid(self) -> str:
+        """Device gid as a string, the key this coordinator's data is under."""
+        return self._device_gid
+
+    @property
     def available(self) -> bool:
         """Return True if entity is available."""
         return self._device is not None

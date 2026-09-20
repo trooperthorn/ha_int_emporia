@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .charger_entity import EmporiaChargerEntity
 from .const import DOMAIN
+from .write_guard import check_contended_write
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -111,6 +112,10 @@ class EmporiaChargerCurrentNumber(EmporiaChargerEntity, NumberEntity):  # type: 
         """Set the charger current limit with optimistic UI response."""
         current = int(value)
         current = max(6, min(current, int(self._attr_native_max_value)))
+
+        # See write_guard: Emporia rewrites this same field while one of its
+        # energy-management features is active.
+        check_contended_write(self, "charging current")
 
         previous_value = self.native_value
 

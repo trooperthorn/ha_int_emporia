@@ -47,7 +47,7 @@ from .coordinator import (
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-PLATFORMS: list[str] = ["sensor", "switch", "number"]
+PLATFORMS: list[str] = ["binary_sensor", "sensor", "switch", "number"]
 SENSITIVE_CONFIG_KEYS = {
     CONF_PASSWORD,
     CONF_ID_TOKEN,

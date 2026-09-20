@@ -68,6 +68,21 @@
         "sensor": {
             "charger_status": {
                 "name": "Status"
+            },
+            "energy_management": {
+                "name": "Energy Management",
+                "state": {
+                    "manual": "Manual",
+                    "excess_solar": "Excess Solar",
+                    "peak_demand": "Peak Demand",
+                    "schedule": "Schedule",
+                    "overridden": "Overridden"
+                }
+            }
+        },
+        "binary_sensor": {
+            "cloud_managed": {
+                "name": "Cloud Managed"
             }
         }
     },
@@ -98,6 +113,9 @@
         },
         "charger_update_failed": {
             "message": "Failed to update the charger: {error}"
+        },
+        "write_contended": {
+            "message": "Refused to write {description}: Emporia's {controller} is currently managing this charger and would overwrite it. {detail} Turn off \"Block writes while cloud-managed\" in the integration options to allow the write anyway."
         }
     },
     "services": {
@@ -110,6 +128,20 @@
                 }
             },
             "name": "Set charger current"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "vehicle_soc_sensor": "Vehicle state of charge sensor",
+                    "battery_capacity_kwh": "Battery capacity",
+                    "block_contended_writes": "Block writes while cloud-managed"
+                },
+                "data_description": {
+                    "block_contended_writes": "Emporia's Excess Solar, Peak Demand and schedule features write the same charging-rate field this integration writes, so a value set while one of them is active may not stick. Leave this off to write anyway and log a warning; turn it on to refuse the write with an error instead."
+                }
+            }
         }
     }
 }
