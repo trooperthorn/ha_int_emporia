@@ -12,5 +12,9 @@ agent) knows where to look.
   charger's eventual-consistency behavior.
 - [decisions.md](decisions.md): dated decisions, including the alternative
   rejected and why.
+- [ev-charging-workflows.md](ev-charging-workflows.md): what Emporia's own
+  app and cloud support for EV charging versus what this integration
+  exposes, where the two fight each other, and a ranked list of workflow
+  improvements.
 - [operations.md](operations.md): running the test suite locally, including
   the install order it depends on.
