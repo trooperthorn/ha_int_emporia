@@ -23,6 +23,14 @@ Unix-only. Run the test suite from WSL (or another Linux/macOS
 environment) on a Windows development machine; it cannot run under the
 native Windows Python.
 
+A ready venv exists at `~/emporiavenv` inside WSL, pinned to the versions CI
+asserts (Python 3.14, `homeassistant` 2026.9.0,
+`pytest-homeassistant-custom-component` 0.13.362):
+
+```bash
+wsl -e bash -lc 'cd /mnt/c/Users/sean.LAB/repos/ha_int_emporia && ~/emporiavenv/bin/python -m pytest tests/ -q'
+```
+
 ## Probing the Emporia cloud API
 
 `scripts/api_probe.py` authenticates as you and issues a read-only GET against
