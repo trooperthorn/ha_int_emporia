@@ -687,9 +687,22 @@ def run_discover_commands(args: argparse.Namespace) -> int:
     return 0
 
 
-def is_overridden(loads):
+def is_overridden(loads: Any) -> bool:
     """True when any load reports an active energy-management override."""
-    return any(entry.get("energyManagementOverridden") for entry in (loads or []))
+    if not isinstance(loads, list):
+        return False
+    return any(entry.get("energyManagementOverridden") for entry in loads)
+
+
+def is_clean_state(loads: Any) -> bool:
+    """True only when the cloud positively reports no override running.
+
+    Deliberately not `not is_overridden(...)`. A failed or empty response makes
+    `loads` None, and "no data" is not "no override" — reading it that way once
+    fired a command into the middle of a live override and produced a run that
+    looked meaningful and was not.
+    """
+    return isinstance(loads, list) and len(loads) > 0 and not is_overridden(loads)
 
 
 def read_load_state(session: requests.Session, id_token: str) -> Any:
@@ -729,10 +742,18 @@ def run_send_command(args: argparse.Namespace) -> int:
     # A command that asks for the state the charger is already in is a no-op,
     # and the run tells you nothing. There is no command that cancels an
     # override, so the only route to a clean state is to wait for it to lapse.
-    if is_overridden(before):
+    # An absent loads[] counts as not-clean too: no data is not evidence that
+    # no override is running.
+    if not is_clean_state(before):
         if not args.wait_for_clean_state:
+            reason = (
+                "an energy-management override is ALREADY active"
+                if is_overridden(before)
+                else "the cloud returned no loads[] data, so the override state\n"
+                     "  is unknown"
+            )
             print(
-                "\n  CAUTION: an energy-management override is ALREADY active.\n"
+                f"\n  CAUTION: {reason}.\n"
                 "  A command that requests the state it already produces will\n"
                 "  look like a no-op, and this run will not tell you whether\n"
                 "  the command creates an override. Overrides cannot be\n"
@@ -745,14 +766,21 @@ def run_send_command(args: argparse.Namespace) -> int:
                 f"\nOverride active. Polling every 60s for up to "
                 f"{args.wait_timeout // 60} min, then sending automatically."
             )
-            while is_overridden(before):
+            while not is_clean_state(before):
                 if time.monotonic() > deadline:
                     print("\nTimed out waiting for a clean state. Nothing sent.")
                     return 1
                 time.sleep(60)
                 before = read_load_state(session, id_token)
                 stamp = dt.datetime.now().astimezone().strftime("%H:%M:%S")
-                state = "still overridden" if is_overridden(before) else "CLEAR"
+                if is_clean_state(before):
+                    state = "CLEAR"
+                elif is_overridden(before):
+                    state = "still overridden"
+                else:
+                    # No loads[] in the response. Keep waiting: absent data is
+                    # not evidence the override ended.
+                    state = "no data (still waiting)"
                 print(f"  {stamp}  {state}")
             print("\nloads[] is now clean:")
             print(json.dumps(before, indent=2))

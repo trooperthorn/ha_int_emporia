@@ -668,7 +668,16 @@ BoringSSL with a compiled-in root store and ignores Android's user CA store.
    shorten, not around an acquire/release pair.
 
    The remaining unknown is narrow: whether `CHARGE_AT_FULL_POWER` is what
-   *opens* that window. Both sends so far happened while an override was
+   *opens* that window. Three attempts have failed to answer it, all for the
+   same reason — the command was sent while an override was already running,
+   so it requested a state the charger was already in. The third looked like a
+   clean-state test but was not: the status endpoint returned no `loads[]` at
+   all for one poll, the probe read absent data as "no override", and fired
+   mid-window. The give-away is that the window afterwards still read
+   `11:40 am to 2:40 pm` rather than restarting.
+
+   Whatever opens the window, it does not restart it when re-sent, and a rate
+   write during one does not extend it. Both sends so far happened while an override was
    already running, so the command requested a state the charger was already
    in; `loads[]` did not change and the window did not restart. Testing it from
    a clean state — after an override lapses — settles it.
