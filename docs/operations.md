@@ -66,3 +66,25 @@ python scripts/api_probe.py --rescrub emporia-probe-<stamp>.json
 
 That rewrites the JSON only. Delete the matching `.log` and re-run to
 regenerate it.
+
+### Sending a charger command
+
+`scripts/api_probe.py --send-command` is the one part of the probe that writes.
+It POSTs a single command to `/v1/customers/evse/control` and shows the legacy
+`loads[]` array before and after, which is how you tell whether a command
+opened an energy-management override.
+
+```bash
+python scripts/api_probe.py --token-file ~/.emporia-probe.json \
+    --send-command CHARGE_AT_FULL_POWER
+```
+
+It prints the exact request, warns when the command value has never been
+observed on the wire, and requires you to type `yes`. `--yes` skips the prompt;
+`--force-command` allows a value outside the known list.
+
+`TURN_ON` and `TURN_OFF` are captured from the official web app. The rest are
+enum-shaped strings taken from the app binary and are unverified until someone
+sends one — see [api-reference.md](api-reference.md#still-uncaptured).
+
+**This changes your EV charger.** Nothing else in the script does.

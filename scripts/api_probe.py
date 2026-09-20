@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Read-only probe of the Emporia cloud API.
+"""Probe of the Emporia cloud API.
 
 Logs in as you, issues a GET against every endpoint listed in
 docs/api-reference.md, and writes a JSON capture plus a human-readable log so
 the undocumented parts of the surface can be pinned down with real responses.
 
-This script only ever issues GET requests. There is no code path in it that
-writes, controls, or changes anything on your account or hardware.
+**The default run is read-only.** Every probe is a GET. The only way to make
+this script write anything is `--send-command`, which is opt-in, names the
+single endpoint it will POST to, prints the exact body, and requires a typed
+confirmation before sending. See "Sending a command" below.
 
 Your password is read with getpass, is never passed on the command line, and
 is never written to either output file. Tokens are redacted from the capture.
@@ -41,6 +43,20 @@ and what an override looks like on the wire:
 
 Repeat with Excess Solar toggled off for that energy monitor, and with a
 schedule enabled, to separate the controllers.
+
+Sending a command
+-----------------
+`POST /v1/customers/evse/control` takes `{"device_id": ..., "command": ...}`.
+`TURN_ON` and `TURN_OFF` are observed; the rest are enum-shaped strings lifted
+from the app binary and are **unverified guesses** until someone sends one.
+
+    python scripts/api_probe.py --token-file ~/.emporia-probe.json \
+        --send-command CHARGE_AT_FULL_POWER
+
+This reads `loads[]` before, prints the request, asks you to type "yes", sends
+it, then re-reads `loads[]` and shows what changed — which is how you tell
+whether a command opened an energy-management override. It changes your
+charger. Nothing else in this script does.
 """
 
 from __future__ import annotations
@@ -566,6 +582,90 @@ def run_diff(before_path: str, after_path: str) -> int:
     return 0
 
 
+CONTROL_PATH = "/v1/customers/evse/control"
+
+# Observed on the wire, versus enum-shaped strings found in the app binary.
+OBSERVED_COMMANDS = {"TURN_ON", "TURN_OFF"}
+CANDIDATE_COMMANDS = {
+    "CHARGE_AT_FULL_POWER", "CHARGE_WITH_EXCESS_SOLAR", "CHARGE_NOW",
+    "CHARGE_BOOST", "CHARGE_TO_STATE_OF_CHARGE", "CHARGE_DURING_PEAK",
+    "PAUSE", "RESUME",
+}
+
+
+def read_load_state(session: requests.Session, id_token: str) -> Any:
+    """Return the legacy loads[] array, which carries override state."""
+    record = probe(session, LEGACY_ORIGIN, "/customers/devices/status", {}, id_token)
+    body = record.get("body") or {}
+    return body.get("loads")
+
+
+def run_send_command(args: argparse.Namespace) -> int:
+    """POST one command to the EVSE control endpoint, with before/after state."""
+    command = args.send_command.strip().upper()
+    if command not in OBSERVED_COMMANDS | CANDIDATE_COMMANDS:
+        print(f"Unknown command {command!r}. Known values:")
+        print("  observed:  " + ", ".join(sorted(OBSERVED_COMMANDS)))
+        print("  candidate: " + ", ".join(sorted(CANDIDATE_COMMANDS)))
+        print("Pass --force-command to send it anyway.")
+        if not args.force_command:
+            return 2
+
+    vue = authenticate(args)
+    id_token = vue.auth.tokens["id_token"]
+    session = requests.Session()
+
+    device_id = args.device_id
+    if not device_id:
+        found = discover(vue)
+        if not found["evse_ids"]:
+            sys.exit("No EV charger found; pass --device-id explicitly.")
+        device_id = found["evse_ids"][0]
+
+    before = read_load_state(session, id_token)
+    print("\nloads[] before:")
+    print(json.dumps(before, indent=2))
+
+    body = {"device_id": device_id, "command": command}
+    print(f"\nAbout to send:\n  POST {LEGACY_ORIGIN}{CONTROL_PATH}\n  {json.dumps(body)}")
+    if command not in OBSERVED_COMMANDS:
+        print("  NOTE: this command value has never been observed on the wire.")
+    print("\nThis changes your EV charger.")
+
+    if not args.yes and input('Type "yes" to send: ').strip().lower() != "yes":
+        print("Aborted. Nothing was sent.")
+        return 1
+
+    started = time.monotonic()
+    response = session.post(
+        LEGACY_ORIGIN + CONTROL_PATH,
+        headers={
+            "AuthToken": id_token,
+            "Authorization": id_token,
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        },
+        json=body,
+        timeout=TIMEOUT,
+    )
+    elapsed = round((time.monotonic() - started) * 1000)
+    print(f"\n{response.status_code} in {elapsed} ms")
+    print(scrub_text(response.text[:2000]) or "(empty body)")
+
+    # The cloud needs a moment to reflect a command in loads[].
+    for attempt in range(6):
+        time.sleep(2)
+        after = read_load_state(session, id_token)
+        if after != before:
+            print(f"\nloads[] changed after ~{(attempt + 1) * 2}s:")
+            print(json.dumps(after, indent=2))
+            return 0
+
+    print("\nloads[] unchanged after 12s:")
+    print(json.dumps(after, indent=2))
+    return 0
+
+
 def run_rescrub(path: str) -> int:
     """Re-apply redaction to an existing capture, in place.
 
@@ -629,12 +729,31 @@ def main() -> int:
         "--rescrub", metavar="CAPTURE.json",
         help="re-apply redaction to an existing capture, in place",
     )
+    parser.add_argument(
+        "--send-command", metavar="COMMAND",
+        help="POST one command to /v1/customers/evse/control. THIS WRITES. "
+             "Shows loads[] before and after so you can see whether it opened "
+             "an energy-management override.",
+    )
+    parser.add_argument(
+        "--device-id", help="charger serial for --send-command (default: discovered)",
+    )
+    parser.add_argument(
+        "--force-command", action="store_true",
+        help="allow a --send-command value not in the known list",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="skip the typed confirmation for --send-command",
+    )
     args = parser.parse_args()
 
     if args.diff:
         return run_diff(*args.diff)
     if args.rescrub:
         return run_rescrub(args.rescrub)
+    if args.send_command:
+        return run_send_command(args)
     return run(args)
 
 
