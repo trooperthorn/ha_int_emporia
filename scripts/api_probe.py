@@ -74,12 +74,24 @@ TIMEOUT = 20
 # Keys whose values are redacted unless --no-redact is passed. Device gids and
 # serials are kept: the capture is for the account owner, and diffing needs
 # stable identifiers. Scrub the file yourself before sharing it publicly.
+#
+# Applied only inside response bodies, never to the probe's own record fields —
+# an earlier version matched the probe's `name` key and made the log unreadable.
 REDACT_KEY = re.compile(
-    r"(token|password|secret|authorization|breakerpin|pin$|email|firstname|lastname"
-    r"|first_name|last_name|\bname$|display_name|displayname|street|address|city"
-    r"|zip|postal|latitude|longitude|phone)",
+    r"(token|password|secret|authorization|breakerpin|breaker_pin|^pin$"
+    r"|email|firstname|lastname|first_name|last_name"
+    r"|display_name|displayname|device_name|devicename"
+    r"|street|address|city|zip|postal|latitude|longitude|phone)",
     re.IGNORECASE,
 )
+
+# Emporia echoes the authenticated identity back inside some 4xx error strings
+# (`{identity={sourceIp=..., email=...}}`), so key-based redaction alone leaks
+# both. These scrub the values wherever they appear in any string.
+REDACT_VALUE = [
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "<email>"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+]
 
 # (label, origin, path, needs) — `needs` names the discovered value this probe
 # requires; the probe is skipped with a reason when it is unavailable.
@@ -143,6 +155,13 @@ PROBES: list[tuple[str, str, str, str | None]] = [
 ]
 
 
+def scrub_text(value: str) -> str:
+    """Strip identity values that appear inside free-text strings."""
+    for pattern, replacement in REDACT_VALUE:
+        value = pattern.sub(replacement, value)
+    return value
+
+
 def redact(value: Any, enabled: bool) -> Any:
     """Recursively blank out credential and personal fields."""
     if not enabled:
@@ -157,7 +176,20 @@ def redact(value: Any, enabled: bool) -> Any:
         return out
     if isinstance(value, list):
         return [redact(item, enabled) for item in value]
+    if isinstance(value, str):
+        return scrub_text(value)
     return value
+
+
+def redact_record(record: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Redact a probe result, leaving the probe's own bookkeeping fields alone."""
+    out = dict(record)
+    if "body" in out:
+        out["body"] = redact(out["body"], enabled)
+    for key in ("body_text", "error"):
+        if isinstance(out.get(key), str):
+            out[key] = scrub_text(out[key])
+    return out
 
 
 def field_paths(value: Any, prefix: str = "") -> set[str]:
@@ -335,7 +367,9 @@ def run(args: argparse.Namespace) -> int:
         "label": args.label,
         "redacted": not args.no_redact,
         "window_days": args.days,
-        "results": redact(copy.deepcopy(results), not args.no_redact),
+        "results": [
+            redact_record(r, not args.no_redact) for r in copy.deepcopy(results)
+        ],
     }
 
     json_path = f"{base}.json"
@@ -431,6 +465,31 @@ def run_diff(before_path: str, after_path: str) -> int:
     return 0
 
 
+def run_rescrub(path: str) -> int:
+    """Re-apply redaction to an existing capture, in place.
+
+    For captures written before value-level scrubbing existed: Emporia echoes
+    the authenticated email and source IP inside some 4xx error strings, which
+    key-based redaction alone did not catch.
+    """
+    with open(path, encoding="utf-8") as handle:
+        capture = json.load(handle)
+
+    before = json.dumps(capture)
+    capture["results"] = [redact_record(r, True) for r in capture["results"]]
+    capture["redacted"] = True
+    after = json.dumps(capture)
+
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(capture, handle, indent=2, default=str)
+
+    print(f"Rescrubbed {path}")
+    print("  changed" if before != after else "  already clean")
+    print("  The matching .log is NOT rewritten — delete it and re-run to "
+          "regenerate, or scrub it by hand.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Read-only probe of the Emporia cloud API.",
@@ -464,10 +523,16 @@ def main() -> int:
         "--diff", nargs=2, metavar=("BEFORE.json", "AFTER.json"),
         help="compare two captures instead of probing",
     )
+    parser.add_argument(
+        "--rescrub", metavar="CAPTURE.json",
+        help="re-apply redaction to an existing capture, in place",
+    )
     args = parser.parse_args()
 
     if args.diff:
         return run_diff(*args.diff)
+    if args.rescrub:
+        return run_rescrub(args.rescrub)
     return run(args)
 
 

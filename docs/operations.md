@@ -53,4 +53,16 @@ python scripts/api_probe.py --token-file ~/.emporia-probe.json --label after
 python scripts/api_probe.py --diff emporia-probe-*-before.json emporia-probe-*-after.json
 ```
 
-Captures are not committed. Keep them outside the working tree.
+Captures are gitignored, but keep them out of the working tree anyway.
+
+Redaction blanks personal *keys* and also scrubs email addresses and IPv4
+addresses out of *values*, because Emporia's legacy 4xx bodies echo the
+authenticated identity back (`{identity={sourceIp=..., email=...}}`). A capture
+taken before that existed can be cleaned in place:
+
+```bash
+python scripts/api_probe.py --rescrub emporia-probe-<stamp>.json
+```
+
+That rewrites the JSON only. Delete the matching `.log` and re-run to
+regenerate it.
