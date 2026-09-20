@@ -598,6 +598,89 @@ CANDIDATE_COMMANDS = {
 }
 KNOWN_COMMANDS = OBSERVED_COMMANDS | ACCEPTED_COMMANDS | CANDIDATE_COMMANDS
 
+# Rejected outright: 400 "Unexpected value" from ChargerControlCommand.
+REJECTED_COMMANDS = {"CHARGE_WITH_EXCESS_SOLAR"}
+
+# Values to test for enum membership with --discover-commands. Drawn from
+# enum-shaped strings in the app binary plus obvious naming variants.
+ENUM_CANDIDATES = [
+    "TURN_ON", "TURN_OFF",
+    "CHARGE_AT_FULL_POWER", "CHARGE_NOW", "CHARGE_BOOST",
+    "CHARGE_TO_STATE_OF_CHARGE", "CHARGE_DURING_PEAK", "CHARGE",
+    "PAUSE", "RESUME", "STOP", "START",
+    "CHARGE_WITH_EXCESS_SOLAR", "EXCESS_SOLAR", "OVERRIDE_EXCESS_SOLAR",
+    "OVERRIDE_PEAK_DEMAND_CHARGE_OR_PAUSE", "OVERRIDE_PEAK_DEMAND_RESUME",
+    "OVERRIDE_UTILITY", "MANUAL_ECO",
+    "CLEAR_OVERRIDE", "END_OVERRIDE", "CANCEL_OVERRIDE", "REMOVE_OVERRIDE",
+    "RESUME_ENERGY_MANAGEMENT", "RESUME_SCHEDULE", "AUTO", "AUTOMATIC",
+    "SMART_CHARGING", "ECO", "DEFAULT", "NONE",
+]
+
+# Substring of the Jackson error that means "not a member of the enum".
+NOT_A_MEMBER = "Unexpected value"
+
+
+def run_discover_commands(args: argparse.Namespace) -> int:
+    """Enumerate ChargerControlCommand members without executing anything.
+
+    The control endpoint deserializes the request body before it validates it.
+    A body carrying a `command` but **no `device_id`** therefore fails one of
+    two ways: at JSON parse, if the enum value does not exist, or later on the
+    missing device. Neither path reaches a charger, so this maps the enum
+    without changing any state.
+    """
+    vue = authenticate(args)
+    id_token = vue.auth.tokens["id_token"]
+    session = requests.Session()
+    headers = {
+        "AuthToken": id_token,
+        "Authorization": id_token,
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    }
+
+    def ask(command: str) -> tuple[int, str]:
+        body = {"command": command}
+        assert "device_id" not in body, "enum probe must never carry a device"
+        response = session.post(
+            LEGACY_ORIGIN + CONTROL_PATH, headers=headers, json=body, timeout=TIMEOUT
+        )
+        return response.status_code, response.text
+
+    print(
+        "Mapping ChargerControlCommand.\n"
+        "Every request omits device_id, so none of them can reach the charger.\n"
+    )
+
+    # Verify the oracle before trusting it: a known-good value and a nonsense
+    # value must fail in visibly different ways.
+    good_status, good_text = ask("TURN_ON")
+    bad_status, bad_text = ask("ZZ_NOT_A_REAL_COMMAND")
+    if NOT_A_MEMBER in good_text or NOT_A_MEMBER not in bad_text:
+        print("Oracle check FAILED — results would be meaningless. Aborting.")
+        print(f"  TURN_ON            -> {good_status} {good_text[:200]}")
+        print(f"  ZZ_NOT_A_REAL_...  -> {bad_status} {bad_text[:200]}")
+        return 2
+    print("Oracle check passed:")
+    print(f"  valid value   -> {good_status} {scrub_text(good_text)[:160]}")
+    print(f"  invalid value -> {bad_status} {scrub_text(bad_text)[:160]}\n")
+
+    members, rejected = [], []
+    for command in ENUM_CANDIDATES:
+        status, text = ask(command)
+        if NOT_A_MEMBER in text:
+            rejected.append(command)
+            print(f"  --      {command}")
+        else:
+            members.append(command)
+            print(f"  MEMBER  {command}   ({status})")
+        time.sleep(args.delay)
+
+    print(f"\n{len(members)} member(s): {', '.join(members)}")
+    print(f"{len(rejected)} rejected.")
+    print("\nNothing was executed: no request carried a device_id.")
+    return 0
+
 
 def read_load_state(session: requests.Session, id_token: str) -> Any:
     """Return the legacy loads[] array, which carries override state."""
@@ -718,7 +801,8 @@ def run_rescrub(path: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Read-only probe of the Emporia cloud API.",
+        description="Probe of the Emporia cloud API. Read-only unless "
+                    "--send-command is used.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -760,6 +844,11 @@ def main() -> int:
              "an energy-management override.",
     )
     parser.add_argument(
+        "--discover-commands", action="store_true",
+        help="map the ChargerControlCommand enum. Sends POSTs with no device_id, "
+             "so nothing can reach the charger and no state changes.",
+    )
+    parser.add_argument(
         "--device-id", help="charger serial for --send-command (default: discovered)",
     )
     parser.add_argument(
@@ -776,6 +865,8 @@ def main() -> int:
         return run_diff(*args.diff)
     if args.rescrub:
         return run_rescrub(args.rescrub)
+    if args.discover_commands:
+        return run_discover_commands(args)
     if args.send_command:
         return run_send_command(args)
     return run(args)

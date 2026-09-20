@@ -636,26 +636,36 @@ BoringSSL with a compiled-in root store and ignores Android's user CA store.
    `EXCESS_SOLAR_PAUSED`, `PEAK_DEMAND_PAUSED`, `WAITING_FOR_SOLAR`,
    `MANUALLY_STOPPED`, `PREVENTED_CHARGING`.
 
-   **`CHARGE_AT_FULL_POWER` is an accepted `command` value** (V-live). Sent to
-   `POST /v1/customers/evse/control` it returns **`200` with an empty body** —
-   not the `400 error_code/error_message` this API gives for bad input. So the
-   enum member is real and the endpoint is the EV control path.
+   **`CHARGE_AT_FULL_POWER` is a real enum member** (V-live): the endpoint
+   answers `200` with an empty body. **`CHARGE_WITH_EXCESS_SOLAR` is not**:
 
-   **What it does is still unproven.** The test was run while an override was
-   already active (`11:40 am to 2:40 pm`), so the command requested a state the
-   charger was already in. `loads[]` was unchanged 12 seconds later and the
-   window did **not** restart. That rules out "every send opens a fresh
-   override", and is consistent with either an idempotent override-create or a
-   command that does something else entirely.
+   ```json
+   {"error_code": "OTHER",
+    "error_message": "JSON parse error: Cannot construct instance of
+      `com.emporiaenergy.api.openapi.model.ChargerControlCommand`,
+      problem: Unexpected value 'CHARGE_WITH_EXCESS_SOLAR'"}
+   ```
 
-   The remaining commands are still unsent. To settle it, test from a state
-   that is not already the target:
+   That error is more useful than it looks. It names the enum
+   (`ChargerControlCommand`), confirms an OpenAPI-generated Jackson model
+   behind the API, and — because the body is deserialized *before* it is
+   validated — provides a **side-effect-free membership oracle**:
 
-   1. `--send-command CHARGE_WITH_EXCESS_SOLAR` while an override is active. If
-      that is the release, `energyManagementOverridden` flips to `false`
-      immediately — decisive, because the charger is not already in that state.
-   2. Then `--send-command CHARGE_AT_FULL_POWER` from the clean state and watch
-      for a fresh window.
+   > A request carrying a `command` but **no `device_id`** fails either at JSON
+   > parse (value not in the enum) or later on the missing device (value is in
+   > the enum). Neither path reaches a charger.
+
+   `scripts/api_probe.py --discover-commands` uses exactly that to map the enum
+   without executing anything. It verifies the oracle first — a known-good and
+   a nonsense value must fail in visibly different ways — and aborts if they
+   do not.
+
+   What `CHARGE_AT_FULL_POWER` actually *does* is still unproven: both sends
+   happened while an override was already running, so the command requested a
+   state the charger was already in. `loads[]` did not change and the window did
+   not restart, which rules out "every send opens a fresh override" but is
+   equally consistent with an idempotent create.
+
 2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable
    enable/disable. The **read** side is now captured (see the Energy management
    table); the write is the same path and is reachable from the web app's

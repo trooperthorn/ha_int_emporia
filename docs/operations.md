@@ -88,3 +88,20 @@ enum-shaped strings taken from the app binary and are unverified until someone
 sends one — see [api-reference.md](api-reference.md#still-uncaptured).
 
 **This changes your EV charger.** Nothing else in the script does.
+
+### Mapping the command enum
+
+`--discover-commands` works out which values `ChargerControlCommand` accepts
+**without executing any of them**:
+
+```bash
+python scripts/api_probe.py --token-file ~/.emporia-probe.json --discover-commands
+```
+
+The control endpoint deserializes the request body before validating it, so a
+body carrying a `command` but **no `device_id`** fails either at JSON parse
+(the value is not in the enum) or later on the missing device (it is). Neither
+path reaches a charger.
+
+The run verifies that oracle before trusting it — a known-good value and a
+nonsense value must fail in visibly different ways — and aborts if they do not.
