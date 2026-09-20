@@ -48,7 +48,30 @@ The same capture confirms **why a written setpoint does not stick**: with
 Excess Solar active, `evChargers[0].chargingRate` read **35** against a
 `maxChargingRate` of **40**. Emporia's cloud writes the same `chargingRate`
 field the integration's `number` entity writes. They are not two settings that
-coexist; they are one field with two writers.
+coexist; they are one field with two writers. Within a single probe run
+(~90 seconds) the cloud moved the rate 35 → 33 → 35, so the contention is
+continuous, not occasional.
+
+### The override is visible there too
+
+A before/after capture across the app's **Manage Charging → "Charge at full
+power"** confirms that a manual override is fully observable on the same
+legacy response. Nothing else on the account changed between the two runs.
+
+| Field | Before | After |
+| --- | --- | --- |
+| `loads[].energyManagementOverridden` | `false` | **`true`** |
+| `loads[].energyManagementText` | `"Charging with Excess Solar since 10:17 am."` | `"Charging with Excess Solar since 10:17 am.\nOverridden from 11:40 am to 2:40 pm."` |
+| `evChargers[].chargingRate` | `35` | `40` |
+| `evChargers[].chargerOn` | `true` | `true` (unchanged) |
+
+So "Charge at full power" is a **three-hour time-boxed override** that releases
+the rate to `maxChargingRate` and hands control back afterwards. The window is
+Emporia's default, not something the app asked for.
+
+Everything an integration needs to *see* an override — that one is active, what
+it suppressed, and when it lapses — is therefore available on the legacy host
+with no new request. Only *setting* one still needs an uncaptured write.
 
 ## Verification legend
 
@@ -248,8 +271,20 @@ V-live. **Not modelled by PyEmVue.** One entry per controllable load, keyed by
 | `peakDemandEnabled` | bool | Peak Demand Management is on for this load. |
 | `excessGenerationEnabled` | bool | Excess Solar is on for this load. |
 | `energyManagementText` | string \| null | e.g. `"Charging with Excess Solar since 10:17 am."` |
-| `energyManagementOverridden` | bool | **A manual override is currently suppressing the controller.** |
+| `energyManagementOverridden` | bool | **A manual override is currently suppressing the controller.** Verified to flip `false` → `true` on the app's "Charge at full power". |
 | `warningText` | string \| null | e.g. meter-disconnect warnings. |
+
+`energyManagementText` is prose and multi-line. Observed forms:
+
+```
+Charging with Excess Solar since 10:17 am.
+Charging with Excess Solar since 10:17 am.\nOverridden from 11:40 am to 2:40 pm.
+```
+
+The override window appears **only here**, not in any structured field on
+either host. Surfacing the string verbatim as an attribute is safe; parsing
+times out of it is not, and would break the moment Emporia rewords it or the
+account locale changes.
 
 ### EVSE detail — v1 `/v1/devices/evses`
 
@@ -317,8 +352,34 @@ V-live.
 
 `charger_status` is a clean uppercase enum here, unlike the legacy free-text
 `status`/`message` pair. `active_since` gives the controller's start time as a
-real timestamp rather than the legacy prose. `override` is `null` when none is
-active; its populated shape is still uncaptured.
+real timestamp rather than the legacy prose.
+
+**Under an override** (V-live, captured across the app's "Charge at full
+power"), the controller moves between the two arrays:
+
+```json
+"active_energy_managements": [],
+"overridden_energy_managements": [
+  { "type": "EXCESS_SOLAR", "override_expires_at": null }
+],
+"charging_rate": 40
+```
+
+and on `/v1/devices/evses`, `energy_management_active` flips from
+`"EXCESS_SOLAR"` to `"NONE"` with `energy_managements_active: []`.
+
+Two cautions:
+
+- **`override_expires_at` was `null` while an override was demonstrably
+  running** with a 2:40 pm expiry. The expiry exists only in the legacy
+  `energyManagementText` prose. Do not treat this field as the source of truth
+  for when an override lapses; today it is not one.
+- `override` stayed `null` in both captures, including while overridden. Its
+  populated shape remains uncaptured, and it may only be set by a different
+  override type than the one the app's button creates.
+
+Together these make the **legacy `loads[]` array the better source** for
+override state, which is convenient: it is the endpoint already polled.
 
 ### Device inventory — v1 `/v1/customers/devices`
 
@@ -449,7 +510,7 @@ For reference, the shape PyEmVue still models: `/customers/vehicles` →
 | Gap | Where it lives | Cost to close |
 | --- | --- | --- |
 | **Which controller owns the rate** | `loads[].energyManagementText`, `.excessGenerationEnabled`, `.peakDemandEnabled`, `.schedulesEnabled` | **None.** Already in a response polled every 60 s; PyEmVue discards it. |
-| **Whether an override is active** | `loads[].energyManagementOverridden` | **None.** Same response. |
+| **Whether an override is active, and its window** | `loads[].energyManagementOverridden`, `.energyManagementText` | **None.** Same response. Verified end to end against the app's "Charge at full power". |
 | **Next scheduled change** | `loads[].nextScheduledEventText` | **None.** Same response. |
 | Load-management flag, slider-suppression hint | `evChargers[].loadManagementEnabled`, `.hideChargeRateSliderText` | None — same response, PyEmVue model change only. |
 | Clean charger status enum, controller start time | v1 `evses[].charger_status`, `.active_energy_managements[].active_since` | v1 client. |
@@ -467,19 +528,35 @@ For reference, the shape PyEmVue still models: `/customers/vehicles` →
 
 ## Still unknown
 
-Three write contracts, all of which need a capture while the change is made in
-the app:
+Override **visibility** is settled (see above). What remains is three write
+contracts, none of which a GET-only probe can capture:
 
-1. **`POST /v1/customers/devices/override`** — the request body, and the shape
-   of `evses[].override` once populated. The `--diff` workflow in
-   [`scripts/api_probe.py`](../scripts/api_probe.py) is built for exactly this.
+1. **`POST /v1/customers/devices/override`** — the request body. The endpoint
+   requires `device_id`; how the duration is expressed (or whether three hours
+   is fixed server-side) is unknown.
 2. **`POST /v1/customers/energy-monitor/excess-generation`** — the durable
    Excess Solar enable/disable.
 3. **`PUT /devices/evcharger/maxchargingrate`** — breaker max, PIN-gated.
 
-Also unresolved: whether `loads[].energyManagementOverridden` flips when the
-app's "Charge at full power" is used, which would make the whole
-override-visibility feature a legacy-only change.
+Also open: whether `PUT /devices/evcharger` with a `chargingRate` — the write
+this integration already makes — itself creates an override, or is simply
+overwritten by the next cloud adjustment. The evidence points at the latter,
+but it has not been tested directly, and testing it means making a write.
+
+## Other observations
+
+- **`supported_energy_managements` array order is not stable** between calls.
+  Compare as a set.
+- **The maintenance banner returns `403 AccessDenied` (XML)**, not 404.
+  PyEmVue's `down_for_maintenance()` treats only 404 as "no maintenance" and
+  otherwise calls `.json()` on the body, which would raise on this XML. The
+  integration never calls it, so this is latent rather than live.
+- **`/v1/customers/ev-charging-report` echoes its interval shifted by the
+  account timezone.** A window requested as `2026-09-13T16:36:34Z` came back as
+  `2026-09-13T21:36:34Z` — exactly the `America/Chicago` offset. It appears to
+  read the timestamp as local and re-serialize it as UTC. Send times in the
+  account's timezone, and do not trust the echoed interval as confirmation of
+  what was asked for.
 
 ## Reproducing this
 

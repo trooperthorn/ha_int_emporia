@@ -50,6 +50,7 @@ import copy
 import datetime as dt
 import difflib
 import getpass
+import glob as globlib
 import json
 import os
 import re
@@ -418,7 +419,26 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve(pattern: str) -> str:
+    """Expand a glob to a single path.
+
+    PowerShell does not expand wildcards before handing arguments to a program,
+    so `--diff *-before.json *-after.json` arrives here literally. Expand it
+    ourselves rather than failing with a confusing OSError.
+    """
+    if not any(ch in pattern for ch in "*?["):
+        return pattern
+    matches = sorted(globlib.glob(pattern))
+    if not matches:
+        sys.exit(f"No file matches {pattern!r}")
+    if len(matches) > 1:
+        listing = "\n  ".join(matches)
+        sys.exit(f"{pattern!r} matches more than one file; name one:\n  {listing}")
+    return matches[0]
+
+
 def run_diff(before_path: str, after_path: str) -> int:
+    before_path, after_path = resolve(before_path), resolve(after_path)
     with open(before_path, encoding="utf-8") as handle:
         before = json.load(handle)
     with open(after_path, encoding="utf-8") as handle:
@@ -472,6 +492,7 @@ def run_rescrub(path: str) -> int:
     the authenticated email and source IP inside some 4xx error strings, which
     key-based redaction alone did not catch.
     """
+    path = resolve(path)
     with open(path, encoding="utf-8") as handle:
         capture = json.load(handle)
 
