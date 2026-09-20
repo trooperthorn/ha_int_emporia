@@ -134,9 +134,9 @@ email=...}}`), which is why the probe scrubs values, not just keys.
 | `/vehicles/v2/settings?vehicleGid=` | GET | `get_vehicle_status` | No | unreachable (no vehicles) | Vehicle SoC/range/charge limit. |
 | `/customers/timeofuse` | GET | — | No | **200** | **Works.** Full TOU rate plan and Smart Saver schedules. See [Time of use](#time-of-use--customerstimeofuse). |
 | `/customers/derms` | GET | — | No | **200 → `[]`** | Demand-response enrolment. |
-| `/customers/loadmanagement` | GET | — | No | **400** | Requires `loadGid`. |
-| `/devices/schedule` | GET | — | No | **400** | Requires `loadGid`. |
-| `/devices/firmwareuptodate` | GET | — | No | **400** | Requires `deviceGids`. |
+| `/customers/loadmanagement` | GET | — | No | **200** with `loadGid` | PowerSmart/load-management config. See [Load management](#load-management--customersloadmanagement). |
+| `/devices/schedule` | GET | — | No | **200 → `[]`** with `loadGid` | Custom (non-TOU) schedules. Empty on this account. |
+| `/devices/firmwareuptodate` | GET | — | No | **200** with `deviceGids` | `[{"deviceGid", "firmwareUpToDate"}]`. |
 | `/devices/evcharger/maxchargingrate` | — | — | No | **404 on GET** | Write-only; the breaker max is PUT, not GET. |
 | `/customers/devices/channels` | GET | — | No | **404** | **Does not exist on the legacy host.** This is a `/v1` path only. |
 
@@ -179,28 +179,28 @@ the live 400 responses.
 | `/v1/customers/devices/channels` | **200** | Nested channel tree keyed on `channel_id`, with `sub_type` giving the channel type as a display string. |
 | `/v1/customers/sites/members` | **405** | `"Request method 'GET' is not supported"` — write-only. |
 | `/v1/customers/devices/settings` | **405 on GET** | `PUT` only — it is the modern charge-rate write. See [Writes](#writes). |
-| `/v1/customers/devices/third-party-access` | **400** | Requires `device_id`. |
+| `/v1/customers/devices/third-party-access` | **200** with `device_id` | `{"third_party_access": []}`. |
 | `/v1/customers/app-preferences` | **406** | `"No acceptable representation"` — needs a specific `Accept` header. |
-| `/v1/customers/homepage/summary` | **400** | Requires `device_ids`. |
+| `/v1/customers/homepage/summary` | **400** | Wants `device_ids` **and** `ev_charger_ids`. |
 | `/v1/customers/homepage/monitor-card` | **400** | Requires `device_ids`. |
-| `/v1/customers/devices/savings` | **400** | Requires `timezone`. |
-| `/v1/customers/devices/usages` | **400** | Requires **`device_gids`** — numeric gids, not the `device_ids` serials every other v1 endpoint takes. |
+| `/v1/customers/devices/savings` | **200** with `timezone` | Lifetime / YTD / 30-day / 7-day / today savings, plus `monthly_breakdown[].daily_breakdown[].savings_events[]` carrying `type` (`EXCESS_SOLAR`), per-event `analysis.actual_costs` vs `potential_costs` and the rate period each was priced at. This is where Emporia's savings numbers come from. |
+| `/v1/customers/devices/usages` | **400** | Requires **`device_gids`** (numeric gids, not the `device_ids` serials every other v1 endpoint takes) **and `energy_unit`**. |
 
 ### Energy management — the four controllers
 
 | Endpoint | Live result | Response / requirement |
 | --- | --- | --- |
-| **`/v1/customers/devices/override`** | **400** | Requires **`device_id`**. The override read exists and is per-device; re-probe with the parameter to capture its shape. |
+| ~~`/v1/customers/devices/override`~~ | **400 with `device_id`** | `"Device overrides are only supported for batteries"`. **Not the EV charger override path.** See the correction below. |
 | `/v1/customers/excess-generation` | **200** | `{"monitors": [{"device_id", "enabled"}], "unavailable_monitors": ["..."]}`. **This is the Excess Solar on/off state.** |
-| `/v1/customers/energy-monitor/excess-generation` | **400** | Requires `device_id`. The per-monitor read; `postExcessGenerationMonitor` is the write. |
+| `/v1/customers/energy-monitor/excess-generation` | **200** with `device_id` | `{"device_id", "loads": [{"load_gid", "enabled"}], "solar_window": null, "sunrise": "…Z", "sunset": "…Z"}`. **Per-load Excess Solar enable** — the read side of the durable off switch, and it hands you sunrise/sunset for free. |
 | `/v1/customers/power-smart` | **200** | `{"monitors": [{"monitor_gid", "enabled"}]}`. Note `monitor_gid` (numeric) here versus `device_id` (serial) on excess-generation — the v1 API is not internally consistent. |
-| `/v1/customers/energy-monitor/power-smart` | **500** | Missing `device_id` produces an *Internal Server Error* rather than a 400. Server-side bug; pass the parameter. |
+| `/v1/customers/energy-monitor/power-smart` | **500** | 500s **with or without** `device_id`, for both monitors. Server-side fault, not a parameter problem. |
 | `/v1/customers/peak-demand` | **200** | `{"peak_demands": [{"device_id", "enabled", "demand_goal_kwatts"}]}`. |
-| `/v1/customers/energy-monitor/peak-demand` | **400** | Requires `device_id`. |
+| `/v1/customers/energy-monitor/peak-demand` | **200** with `device_id` | `{"device_id", "demand_goal_kwatts", "loads": [{"load_gid", "enabled"}]}`. |
 | `/v1/customers/load-sharing` | **400** | Requires `load_sharing_gid`. |
 | `/v1/customers/load-sharings` | **200 → `{"networks": []}`** | The list form; use it to discover gids for the singular endpoint. |
 | `/v1/customers/derms` | **200 → `{"enrollment_statuses": []}`** | |
-| `/v1/derms/devices` | **400** | Requires `device_ids`. |
+| `/v1/derms/devices` | **200** with `device_ids` | `{"programs": [{"program_gid", "vendor", "title", "utility", "logo_bytes", …}]}`. `logo_bytes` is a base64 PNG and bloats a capture — strip it. |
 
 ### EV charging
 
@@ -220,7 +220,7 @@ the live 400 responses.
 | `/v1/customers/rate-analysis` | **200 → `{"device_results": []}`** |
 | `/v1/customers/recommendations` | **200** — array of `{recommendation_gid, title, body, call_to_action, call_to_action_data, device_id, site_gid, status, created_at}`. `call_to_action` values seen: `ENROLL_IN_DERMS_PROGRAM`, `SET_SOLAR_BUYBACK_RATE`. |
 | `/v1/utility-rates` | **400** — `"At least one of either eiaid or utilityCompanyGid must be provided"` |
-| `/v1/devices/utility-rates` | **400** — `"Only one of device_id, device_gid, load_gid or postal_code should be specified"` |
+| `/v1/devices/utility-rates` | **200** with exactly one of `device_id` / `device_gid` / `load_gid` / `postal_code` — the utility's full rate catalogue, each entry with `utility_rate_gid`, `name`, `fixed_charge`, `has_time_of_use`, `has_tiers`, `emporia_managed` and an OpenEI `uri`. |
 
 Not probed (B-apk): `/v1/customers/stream` (likely SSE), `/v1/migrated/app-api/chart-usage`,
 `/v1/devices/merged-channel`, `/v1/devices/fifty-amp-bidirectionality`,
@@ -459,6 +459,38 @@ or Smart Saver enabled to populate.
 Note the interval echo came back shifted by the account timezone: a requested
 `…T16:36:34Z` window was echoed as `…T21:36:34Z`.
 
+### Load management — legacy `/customers/loadmanagement`
+
+V-live, with `loadGid`. This is PowerSmart's configuration on the legacy host.
+
+```json
+{
+  "advertisement": "None",
+  "appLoadManagementResponse": {
+    "loadGid": 225125,
+    "evseUpgradedToLoadManagement": false,
+    "evseSupportsLoadManagement": true,
+    "minimumFirmware": 441,
+    "maxChargingRate": 40,
+    "breakerPIN": "…",
+    "monitors": [
+      { "monitorGid": 42441, "monitorName": "…", "panelLimitAmps": null,
+        "loadManagementEnabled": false, "reservedAmps": null,
+        "controllingDifferentLoad": false }
+    ],
+    "selectedMonitorGid": 42441
+  }
+}
+```
+
+Worth noting: `evseSupportsLoadManagement` is `true` and the charger's firmware
+(`EVCharger-812`) is well past `minimumFirmware: 441`, while
+`evseUpgradedToLoadManagement` is `false`. The PowerSmart paywall is a licence
+flag, not a hardware or firmware capability gate.
+
+`panelLimitAmps` and `reservedAmps` are the panel-capacity inputs PowerSmart
+would use, and `maxChargingRate` appears here as well as on the charger object.
+
 ### Time of use — legacy `/customers/timeofuse`
 
 V-live. Carries both the rate plan and the Smart Saver schedules.
@@ -535,11 +567,16 @@ rate** — unlike the legacy `PUT /devices/evcharger` this integration uses, whi
 sends `chargerOn` and `chargingRate` together and so cannot change one without
 restating the other.
 
-**A pause/resume cycle clears an active override.** Verified: with an Excess
-Solar override running until 2:40 pm, `TURN_OFF` immediately followed by
-`TURN_ON` handed control back to Excess Solar — the Charge Rate screen returned
-to "Managed by Excess Solar". That is a fully captured way to *release* an
-override even though creating one is not yet captured.
+**A pause/resume cycle does _not_ clear an active override.** An earlier
+revision of this document claimed it did, on the strength of the web app's
+Charge Rate screen reporting "Managed by Excess Solar" after the cycle. That
+was a misreading: the screen describes the *configured* controller, not the
+live override state. A probe two minutes later showed the same override still
+running, with its original `11:40 am to 2:40 pm` window intact — a new override
+would have restarted the window. `TURN_OFF`/`TURN_ON` resume **within** an
+existing override; they neither create nor clear one.
+
+Releasing an override is therefore still uncaptured.
 
 ### Charge rate — `PUT /v1/customers/devices/settings`
 
@@ -562,22 +599,35 @@ phone app's **"Charge at full power"** could not be captured there, and the
 phone's own traffic is not interceptable: Flutter's `dart:io` client uses
 BoringSSL with a compiled-in root store and ignores Android's user CA store.
 
-1. **`POST /v1/customers/devices/override`** — the override create. Requires
-   `device_id`. Binary symbols suggest a payload carrying `charging_action`, an
-   override type from `OVERRIDE_EXCESS_SOLAR` /
-   `OVERRIDE_PEAK_DEMAND_CHARGE_OR_PAUSE` / `OVERRIDE_PEAK_DEMAND_RESUME` /
-   `OVERRIDE_UTILITY`, and one of `duration_seconds` / `expires_at` /
-   `expires_in`, with `ENTIRE_DURATION` and `overriddenUntilUnplugged` as
-   alternative extents. **All inferred, none observed.**
-2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable enable/disable.
+1. **The EV override create — path unknown.** `/v1/customers/devices/override`
+   is **not** it: with `device_id` supplied it answers
+   `400 "Device overrides are only supported for batteries"`. An earlier
+   revision of this document called that endpoint "the one that matters most",
+   which was wrong. Every override symbol in the binary that looked promising
+   turns out to be battery-prefixed — `BatteryOverrideRequest`,
+   `postBatteryDeviceOverride`, `startBatteryOverride`, `endBatteryOverride`,
+   `batteryOverrideEndsAt`.
+
+   The likeliest remaining candidate is **another `command` value on
+   `POST /v1/customers/evse/control`**, since `TURN_ON`/`TURN_OFF` are clearly
+   members of a larger enum and that endpoint is already the EV control path.
+   Unverified.
+2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable
+   enable/disable. The **read** side is now captured (see the Energy management
+   table); the write is the same path and is reachable from the web app's
+   Discover → Excess Solar screen.
 3. **`PUT /devices/evcharger/maxchargingrate`** — breaker max, PIN-gated.
 
 **Open and consequential:** does a plain rate write *itself* create an override?
 If `PUT /v1/customers/devices/settings` — or the legacy `PUT /devices/evcharger`
 this integration already uses — sets `energyManagementOverridden`, then the
-integration has been silently creating three-hour overrides all along, and a
-"local control" switch is nearly free. Resolve it by capturing `loads[]`
-immediately after a rate write.
+integration has been silently creating three-hour overrides all along.
+
+Still unresolved. A `charging_rate` write was made while an override was
+*already* running, so it could not have been distinguished from the existing
+one; the override window did not change, which at least rules out "every rate
+write restarts the window". Re-test from a clean state: confirm
+`energyManagementOverridden: false`, write a rate, then read `loads[]`.
 
 ### Capturing a write
 
