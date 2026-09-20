@@ -609,9 +609,30 @@ BoringSSL with a compiled-in root store and ignores Android's user CA store.
    `batteryOverrideEndsAt`.
 
    The likeliest remaining candidate is **another `command` value on
-   `POST /v1/customers/evse/control`**, since `TURN_ON`/`TURN_OFF` are clearly
-   members of a larger enum and that endpoint is already the EV control path.
-   Unverified.
+   `POST /v1/customers/evse/control`**. `TURN_ON`/`TURN_OFF` are clearly members
+   of a larger enum, and the binary contains exactly the enum-shaped strings the
+   app's "Manage Charging" sheet would need:
+
+   | Candidate `command` | Matches UI |
+   | --- | --- |
+   | `TURN_ON` / `TURN_OFF` | **observed** — Resume / Pause |
+   | **`CHARGE_AT_FULL_POWER`** | "Charge at full power" — the override create |
+   | `CHARGE_WITH_EXCESS_SOLAR` | hand control back to Excess Solar — the release |
+   | `CHARGE_NOW`, `CHARGE_BOOST`, `CHARGE_TO_STATE_OF_CHARGE`, `CHARGE_DURING_PEAK` | other sheet actions |
+   | `PAUSE`, `RESUME` | possibly aliases of TURN_OFF/TURN_ON |
+
+   Also present, and consistent with the `loads[].warningText` field:
+   `CHARGE_BOOST_UNSUPPORTED`, `CHARGE_BOOST_METER_NOT_LINKED`,
+   `CHARGE_BOOST_METER_OFFLINE`, `POWERSMART_UPGRADE_REQUIRED`,
+   `LOAD_SHARING_OTHER_CHARGER_OFFLINE`, `CHARGER_HALTED`, `CHARGER_NOT_READY`,
+   `EXCESS_SOLAR_PAUSED`, `PEAK_DEMAND_PAUSED`, `WAITING_FOR_SOLAR`,
+   `MANUALLY_STOPPED`, `PREVENTED_CHARGING`.
+
+   **Still inference.** These are string constants in the binary, not an
+   observed request. One `POST` with
+   `{"device_id": "…", "command": "CHARGE_AT_FULL_POWER"}` would settle it, and
+   a `loads[]` read immediately after would confirm whether it opens the
+   three-hour window.
 2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable
    enable/disable. The **read** side is now captured (see the Energy management
    table); the write is the same path and is reachable from the web app's
