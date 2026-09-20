@@ -626,6 +626,20 @@ def run_send_command(args: argparse.Namespace) -> int:
     print("\nloads[] before:")
     print(json.dumps(before, indent=2))
 
+    # A command that asks for the state the charger is already in is a no-op,
+    # and the run tells you nothing. Say so before the write, not after.
+    overridden = any(
+        entry.get("energyManagementOverridden") for entry in (before or [])
+    )
+    if overridden:
+        print(
+            "\n  CAUTION: an energy-management override is ALREADY active.\n"
+            "  A command that requests the state it already produces will look\n"
+            "  like a no-op, and this run will not tell you whether the command\n"
+            "  creates an override. To test that, either release the override\n"
+            "  first or wait for it to lapse, then re-run from a clean state."
+        )
+
     body = {"device_id": device_id, "command": command}
     print(f"\nAbout to send:\n  POST {LEGACY_ORIGIN}{CONTROL_PATH}\n  {json.dumps(body)}")
     if command not in OBSERVED_COMMANDS:

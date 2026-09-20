@@ -562,10 +562,18 @@ Authorization: <cognito id token>
 {"device_id": "D…", "command": "TURN_OFF"}
 ```
 
-`command` is `TURN_OFF` (pause) or `TURN_ON` (resume). It carries **no charging
+Observed `command` values: `TURN_OFF` (pause), `TURN_ON` (resume), and
+`CHARGE_AT_FULL_POWER` (accepted — `200`, effect unproven; see
+[Still uncaptured](#still-uncaptured)). The request carries **no charging
 rate** — unlike the legacy `PUT /devices/evcharger` this integration uses, which
 sends `chargerOn` and `chargingRate` together and so cannot change one without
 restating the other.
+
+**Responses are `200` with an empty body.** There is no result payload to parse
+and no echo of the resulting state, so any client must re-read
+`/customers/devices/status` to find out what actually happened. A rejected
+input gives the usual `{error_code, error_message, user_message}` instead, which
+is how a valid `command` can be distinguished from an invalid one.
 
 **A pause/resume cycle does _not_ clear an active override.** An earlier
 revision of this document claimed it did, on the strength of the web app's
@@ -628,11 +636,26 @@ BoringSSL with a compiled-in root store and ignores Android's user CA store.
    `EXCESS_SOLAR_PAUSED`, `PEAK_DEMAND_PAUSED`, `WAITING_FOR_SOLAR`,
    `MANUALLY_STOPPED`, `PREVENTED_CHARGING`.
 
-   **Still inference.** These are string constants in the binary, not an
-   observed request. One `POST` with
-   `{"device_id": "…", "command": "CHARGE_AT_FULL_POWER"}` would settle it, and
-   a `loads[]` read immediately after would confirm whether it opens the
-   three-hour window.
+   **`CHARGE_AT_FULL_POWER` is an accepted `command` value** (V-live). Sent to
+   `POST /v1/customers/evse/control` it returns **`200` with an empty body** —
+   not the `400 error_code/error_message` this API gives for bad input. So the
+   enum member is real and the endpoint is the EV control path.
+
+   **What it does is still unproven.** The test was run while an override was
+   already active (`11:40 am to 2:40 pm`), so the command requested a state the
+   charger was already in. `loads[]` was unchanged 12 seconds later and the
+   window did **not** restart. That rules out "every send opens a fresh
+   override", and is consistent with either an idempotent override-create or a
+   command that does something else entirely.
+
+   The remaining commands are still unsent. To settle it, test from a state
+   that is not already the target:
+
+   1. `--send-command CHARGE_WITH_EXCESS_SOLAR` while an override is active. If
+      that is the release, `energyManagementOverridden` flips to `false`
+      immediately — decisive, because the charger is not already in that state.
+   2. Then `--send-command CHARGE_AT_FULL_POWER` from the clean state and watch
+      for a fresh window.
 2. **`POST /v1/customers/energy-monitor/excess-generation`** — durable
    enable/disable. The **read** side is now captured (see the Energy management
    table); the write is the same path and is reachable from the web app's
