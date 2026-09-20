@@ -687,6 +687,11 @@ def run_discover_commands(args: argparse.Namespace) -> int:
     return 0
 
 
+def is_overridden(loads):
+    """True when any load reports an active energy-management override."""
+    return any(entry.get("energyManagementOverridden") for entry in (loads or []))
+
+
 def read_load_state(session: requests.Session, id_token: str) -> Any:
     """Return the legacy loads[] array, which carries override state."""
     record = probe(session, LEGACY_ORIGIN, "/customers/devices/status", {}, id_token)
@@ -722,18 +727,35 @@ def run_send_command(args: argparse.Namespace) -> int:
     print(json.dumps(before, indent=2))
 
     # A command that asks for the state the charger is already in is a no-op,
-    # and the run tells you nothing. Say so before the write, not after.
-    overridden = any(
-        entry.get("energyManagementOverridden") for entry in (before or [])
-    )
-    if overridden:
-        print(
-            "\n  CAUTION: an energy-management override is ALREADY active.\n"
-            "  A command that requests the state it already produces will look\n"
-            "  like a no-op, and this run will not tell you whether the command\n"
-            "  creates an override. To test that, either release the override\n"
-            "  first or wait for it to lapse, then re-run from a clean state."
-        )
+    # and the run tells you nothing. There is no command that cancels an
+    # override, so the only route to a clean state is to wait for it to lapse.
+    if is_overridden(before):
+        if not args.wait_for_clean_state:
+            print(
+                "\n  CAUTION: an energy-management override is ALREADY active.\n"
+                "  A command that requests the state it already produces will\n"
+                "  look like a no-op, and this run will not tell you whether\n"
+                "  the command creates an override. Overrides cannot be\n"
+                "  cancelled, only waited out. Re-run with --wait-for-clean-state\n"
+                "  to poll until it lapses and send automatically at that point."
+            )
+        else:
+            deadline = time.monotonic() + args.wait_timeout
+            print(
+                f"\nOverride active. Polling every 60s for up to "
+                f"{args.wait_timeout // 60} min, then sending automatically."
+            )
+            while is_overridden(before):
+                if time.monotonic() > deadline:
+                    print("\nTimed out waiting for a clean state. Nothing sent.")
+                    return 1
+                time.sleep(60)
+                before = read_load_state(session, id_token)
+                stamp = dt.datetime.now().astimezone().strftime("%H:%M:%S")
+                state = "still overridden" if is_overridden(before) else "CLEAR"
+                print(f"  {stamp}  {state}")
+            print("\nloads[] is now clean:")
+            print(json.dumps(before, indent=2))
 
     body = {"device_id": device_id, "command": command}
     print(f"\nAbout to send  >>> {command} <<<")
@@ -855,6 +877,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--device-id", help="charger serial for --send-command (default: discovered)",
+    )
+    parser.add_argument(
+        "--wait-for-clean-state", action="store_true",
+        help="with --send-command: poll until no override is active, then send. "
+             "Overrides cannot be cancelled, so this is the only way to test a "
+             "command from a clean state without watching the clock.",
+    )
+    parser.add_argument(
+        "--wait-timeout", type=int, default=4 * 3600, metavar="SECONDS",
+        help="give up waiting for a clean state after this long (default 4h)",
     )
     parser.add_argument(
         "--force-command", action="store_true",
