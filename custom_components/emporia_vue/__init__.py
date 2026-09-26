@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from botocore.exceptions import ClientError
 from pyemvue import PyEmVue
 from pyemvue.device import ChargerDevice, VueDevice
 import requests
@@ -63,6 +64,28 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 EmporiaVueConfigEntry = ConfigEntry[VueRuntimeData]
+
+COGNITO_NOT_AUTHORIZED_CODE = "NotAuthorizedException"
+
+
+def _is_cognito_not_authorized(err: BaseException) -> bool:
+    """Return True only for a genuine Cognito NotAuthorizedException.
+
+    Distinguishes bad credentials (reauth is the correct fix) from a
+    transient failure -- a connect timeout to Cognito, a 5xx/400 from
+    Emporia's own `/customers` endpoint after login, or some other botocore
+    ClientError code -- which should retry via ConfigEntryNotReady instead of
+    forcing every user into reauth. See the 2026-09-16 Emporia outage
+    (HTTP 400 on /customers for ~2h40m pushed every user into reauth) and
+    upstream issue #466 / PR #467. PR #467 fixes this by turning *every*
+    login exception into ConfigEntryNotReady, which would also swallow a
+    real bad-password NotAuthorizedException; this fork keeps that one case
+    (plus an explicit `False` login result, handled by the caller) mapped to
+    ConfigEntryAuthFailed and treats everything else as not-yet-ready.
+    """
+    if not isinstance(err, ClientError):
+        return False
+    return err.response.get("Error", {}).get("Code") == COGNITO_NOT_AUTHORIZED_CODE
 
 
 def redact_config_data(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -140,18 +163,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: EmporiaVueConfigEntry) -
     loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
     try:
         result: bool = await async_login_vue(loop, vue, entry_data)
+    except ConfigEntryAuthFailed:
+        raise
+    except ClientError as err:
+        if _is_cognito_not_authorized(err):
+            _LOGGER.error("Failed to login to Emporia Vue: invalid credentials")
+            raise ConfigEntryAuthFailed(
+                translation_domain=DOMAIN, translation_key="invalid_auth"
+            ) from err
+        _LOGGER.warning("Emporia Vue login failed; will retry: %s", err)
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="login_not_ready",
+            translation_placeholders={"error": str(err)},
+        ) from err
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        # Timeouts, connection errors, and 5xx/4xx responses (e.g. Emporia's
+        # 2026-09-16 outage returning HTTP 400 from /customers for ~2h40m)
+        # land here. These are not credential failures, so Home Assistant
+        # should retry rather than push every user into reauth.
+        _LOGGER.warning("Emporia Vue login failed; will retry: %s", err)
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="login_not_ready",
+            translation_placeholders={"error": str(err)},
+        ) from err
+    else:
         if not result:
             _LOGGER.error("Failed to login to Emporia Vue")
             raise ConfigEntryAuthFailed(
                 translation_domain=DOMAIN, translation_key="invalid_auth"
             )
-    except ConfigEntryAuthFailed:
-        raise
-    except Exception as err:  # pylint: disable=broad-exception-caught
-        _LOGGER.error("Failed to login to Emporia Vue: %s", err)
-        raise ConfigEntryAuthFailed(
-            translation_domain=DOMAIN, translation_key="invalid_auth"
-        ) from err
 
     if entry_data.get(AUTH_METHOD) == AUTH_METHOD_TOKENS and vue.auth and vue.auth.tokens:
         hass.config_entries.async_update_entry(

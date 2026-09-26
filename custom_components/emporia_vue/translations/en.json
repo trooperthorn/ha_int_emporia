@@ -96,6 +96,9 @@
         "invalid_auth": {
             "message": "Failed to log in to Emporia Vue. Check your credentials or tokens and try again."
         },
+        "login_not_ready": {
+            "message": "Could not reach Emporia to log in; will retry automatically: {error}"
+        },
         "setup_failed": {
             "message": "Error while setting up Emporia Vue: {error}"
         },
