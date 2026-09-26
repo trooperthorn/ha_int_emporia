@@ -78,11 +78,17 @@
           "schedule": "Schedule",
           "overridden": "Overridden"
         }
+      },
+      "cloud_last_update": {
+        "name": "Last successful update"
       }
     },
     "binary_sensor": {
       "cloud_managed": {
         "name": "Cloud Managed"
+      },
+      "cloud_connection": {
+        "name": "Cloud connection"
       }
     }
   },
