@@ -15,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -52,19 +53,46 @@ NATIVE_MAINS_TO_GRID = "MainsToGrid"
 def _device_is_true_mains_panel(device: VueDevice) -> bool:
     """Return True only if this device is a genuine Mains/panel device.
 
-    A device qualifies if it has the combined "1,2,3" channel AND at least
-    one other real channel alongside it. A device reporting only a bare
-    "1,2,3" with nothing else is a single-CT monitor — e.g. a dedicated
+    Two independent exclusions apply before the channel-shape check:
+
+    EV chargers and Smart Plugs/outlets (`device.ev_charger` /
+    `device.outlet` set, per PyEmVue's VueDevice) always report their own
+    usage on the generic combined "1,2,3" channel label too, since that's
+    the same aggregate label Emporia uses for a real panel's Mains CTs.
+    They are never a household panel or grid connection, so Balance/Grid
+    Import-Export sensors (which assume "1,2,3" means "the grid tie") are
+    meaningless for them - e.g. a "Grid Import Energy" reading derived from
+    an EV charger's own consumption. See docs/protocol.md.
+
+    Otherwise, a device qualifies if it has the combined "1,2,3" channel AND
+    at least one other real channel alongside it. A device reporting only a
+    bare "1,2,3" with nothing else is a single-CT monitor - e.g. a dedicated
     solar production meter reporting its lone clamp reading through the
-    same generic aggregate label — not a household panel/grid connection,
+    same generic aggregate label - not a household panel/grid connection,
     and should not get Balance/Grid Import-Export sensors synthesized
     for it.
     """
+    if device.ev_charger is not None or device.outlet is not None:
+        return False
     channel_nums = {ch.channel_num for ch in (device.channels or [])}
     if MAINS_COMBINED_CHANNEL_NUM not in channel_nums:
         return False
     other_channels = channel_nums - {MAINS_COMBINED_CHANNEL_NUM} - MAINS_SPLIT_CHANNELS
     return len(other_channels) > 0
+
+
+def _stale_mains_synthesis_unique_ids(device_gid: int) -> set[str]:
+    """Unique IDs of the Balance/Grid sensors this integration used to
+    synthesize for every device, including EV chargers and outlets, before
+    `_device_is_true_mains_panel` was applied to this loop. Used to clean up
+    the orphaned entity-registry entries left behind on existing installs.
+    """
+    ids = set()
+    for scale in ("1MIN", "1D", "1MON"):
+        ids.add(f"vue_balance_{device_gid}_{scale}")
+        ids.add(f"vue_mains_import_{device_gid}_{scale}")
+        ids.add(f"vue_mains_export_{device_gid}_{scale}")
+    return ids
 
 
 def _coordinator_has_native_mains_split(coordinator, device_gid: int) -> bool:
@@ -159,6 +187,8 @@ async def async_setup_entry(
     add_scale_block(coordinator_1mon, enable_1mon)
 
     for gid, device in device_information.items():
+        if not _device_is_true_mains_panel(device):
+            continue
         for coordinator, scale in (
             (coordinator_1min, "1MIN"),
             (coordinator_day_sensor, "1D"),
@@ -215,6 +245,20 @@ async def async_setup_entry(
                 dev_entry.id,
                 disabled_by=dr.DeviceEntryDisabler.INTEGRATION,
             )
+
+    # Clean up orphaned Balance/Grid entities left behind on existing
+    # installs by earlier versions that synthesized them for every device,
+    # including EV chargers and Smart Plugs/outlets. See
+    # _device_is_true_mains_panel.
+    entity_registry = er.async_get(hass)
+    for gid, device in device_information.items():
+        if device.ev_charger is None and device.outlet is None:
+            continue
+        for unique_id in _stale_mains_synthesis_unique_ids(gid):
+            if entity_id := entity_registry.async_get_entity_id(
+                "sensor", DOMAIN, unique_id
+            ):
+                entity_registry.async_remove(entity_id)
 
 
 class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
@@ -376,16 +420,56 @@ class CurrentVuePowerSensor(CoordinatorEntity, SensorEntity):  # type: ignore
         return self._scale
 
 
-def _map_charger_state(status: str | None, message: str | None, fault_text: str | None) -> tuple[str, str]:
-    """Map Emporia charger status/message to a human-friendly state and IEC 61851 code."""
+def _map_charger_state(
+    status: str | None,
+    message: str | None,
+    fault_text: str | None,
+    icon_name: str | None = None,
+) -> tuple[str, str]:
+    """Map Emporia charger status/message to a human-friendly state and IEC 61851 code.
+
+    Car presence is derived primarily from the charger's own `icon_name`
+    field (PyEmVue's `ChargerDevice.icon`, the JSON `icon` key: values seen
+    are CarConnected / CarNotConnected / DeviceNotConnected), not from
+    `status`/`message`. Those two conflate "car plugged in but charger
+    momentarily paused" with "no car plugged in": both report status
+    "Standby" and message "Please Wait" while the charger is transitioning
+    (e.g. icon_label "Turning Off" or "Preparing"), which previously made a
+    plugged-in car flicker to "Disconnected" every time the charger paused.
+    icon_name distinguishes those two cases directly, so it takes priority.
+    The message-based heuristic below is kept only as a fallback for
+    payloads that don't include icon_name.
+    """
     status_lower = (status or "").lower()
     message_lower = (message or "").lower()
+    icon_lower = (icon_name or "").strip().lower()
     fault = (fault_text or "").strip()
 
     if fault or "error" in status_lower or "fault" in status_lower or "error" in message_lower or "fault" in message_lower:
         return "Error", "F"
     if status_lower == "charging":
         return "Charging", "C"
+
+    if icon_lower == "carconnected":
+        return "Connected", "B"
+    if icon_lower == "carnotconnected":
+        return "Disconnected", "A"
+    if icon_lower in ("devicenotconnected", "offline"):
+        # The charger can't report at all here, so there is no signal about
+        # the car either way. Disconnected (rather than a fabricated
+        # "Connected") matches the pre-fix behavior for this case and keeps
+        # the sensor from claiming a car is present when the charger itself
+        # is unreachable.
+        return "Disconnected", "A"
+    if icon_lower:
+        _LOGGER.debug(
+            "Unmapped charger icon_name: icon_name=%s, status=%s, message=%s",
+            icon_name,
+            status,
+            message,
+        )
+
+    # Fallback: no icon_name in this payload, use the old message heuristic.
     if not status_lower:
         return "Disconnected", "A"
     if status_lower == "devicenotconnected":
@@ -397,6 +481,19 @@ def _map_charger_state(status: str | None, message: str | None, fault_text: str 
             "Unmapped charger state: status=%s, message=%s", status, message
         )
     return "Connected", "B"
+
+
+def _car_accepting_charge(message: str | None) -> bool:
+    """Return False when the car itself is declining the offered current.
+
+    Emporia reports message "EV is not accepting charge" (icon_label
+    "Offering Charge") when the charger is ready to deliver power but the
+    car has stopped drawing it, typically because it hit its own
+    charge-limit or timer setting. That's a normal, expected state, not a
+    fault, so it is surfaced as an attribute rather than folded into the
+    state machine.
+    """
+    return (message or "").strip().lower() != "ev is not accepting charge"
 
 
 CHARGER_STATUS_OPTIONS = ["Disconnected", "Connected", "Charging", "Error"]
@@ -422,21 +519,28 @@ class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: igno
         """Return the human-friendly charger status."""
         data: ChargerDevice | None = self.coordinator.data.get(self._device_gid)
         if data:
-            state, _ = _map_charger_state(data.status, data.message, data.fault_text)
+            state, _ = _map_charger_state(
+                data.status, data.message, data.fault_text, data.icon
+            )
             return state
         return "Unknown"
 
     @property
-    def extra_state_attributes(self) -> dict[str, str | None]:
+    def extra_state_attributes(self) -> dict[str, str | bool | None]:
         """Return IEC code and raw Emporia values as attributes."""
         data: ChargerDevice | None = self.coordinator.data.get(self._device_gid)
         if data:
-            _, iec_code = _map_charger_state(data.status, data.message, data.fault_text)
+            _, iec_code = _map_charger_state(
+                data.status, data.message, data.fault_text, data.icon
+            )
             return {
                 "iec_status": iec_code,
                 "raw_status": data.status,
                 "raw_message": data.message,
                 "fault_text": data.fault_text,
+                "icon_name": data.icon,
+                "icon_label": data.icon_label,
+                "car_accepting_charge": _car_accepting_charge(data.message),
             }
         return {}
 
