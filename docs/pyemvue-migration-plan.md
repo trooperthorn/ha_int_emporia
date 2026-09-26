@@ -45,6 +45,21 @@ step rather than hand-rolling the math, and layer plain `requests` calls
 on top of the tokens it returns. A subtle bug in a hand-rolled SRP flow
 fails silently or intermittently, which is worse than today's dependency.
 
+Whichever helper backs the new `api_client.py` auth step, it must carry the
+fix in `custom_components/emporia_vue/pycognito_compat.py` (see
+docs/decisions.md, 2026-09-26 entry): pycognito 2024.5.1 raises
+`TypeError: Cannot convert str to buffer` on Python 3.14 when verifying a
+Cognito Hosted-UI ID token's `at_hash` claim, which breaks Google/Apple
+token-based login. If the new client keeps using `pycognito` directly, port
+the same scoped subclass patch (or drop it once
+NabuCasa/pycognito#339 ships). If the new client verifies tokens itself
+instead of delegating to `pycognito`, implement `at_hash` verification
+correctly from the start: hash the ASCII access token bytes with the ID
+token's signing algorithm, take the left half of the digest, and base64url
+encode it without padding, per the OIDC Core spec's `at_hash` definition.
+Either way, keep the "reject a token whose at_hash doesn't match" test case
+that `tests/test_pycognito_compat.py` exercises now.
+
 ## Testing impact
 
 Existing tests mock `pyemvue.Vue`; all of those mocks need to be rewritten
