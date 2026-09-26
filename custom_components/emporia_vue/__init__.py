@@ -44,6 +44,7 @@ from .coordinator import (
     VueMonthCoordinator,
     VueRuntimeData,
 )
+from .pycognito_compat import apply_pycognito_compat
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ async def async_login_vue(
     """Log in to Emporia using the configured authentication method."""
     auth_method = entry_data.get(AUTH_METHOD, AUTH_METHOD_EMAIL_PASSWORD)
     if auth_method == AUTH_METHOD_TOKENS:
+        apply_pycognito_compat()
         return await loop.run_in_executor(
             None,
             partial(

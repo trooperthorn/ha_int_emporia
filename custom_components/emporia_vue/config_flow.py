@@ -35,6 +35,7 @@ from .const import (
     SOLAR_INVERT,
     TOKEN_CONFIG_FLOW_SCHEMA,
 )
+from .pycognito_compat import apply_pycognito_compat
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 SENSITIVE_CONFIG_KEYS = {
@@ -60,6 +61,7 @@ class VueHub:
         """Initialize the hub."""
         from pyemvue import PyEmVue
 
+        apply_pycognito_compat()
         self.hass = hass
         self.vue = PyEmVue()
 

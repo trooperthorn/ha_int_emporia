@@ -137,3 +137,53 @@ already carries a documented plan to replace PyEmVue with a direct client.
 
 Rejected: a second request to the same endpoint for the loads data alone. It
 would double the poll rate against an undocumented cloud API for no benefit.
+
+## 2026-09-26: a scoped shim for pycognito's at_hash TypeError on Python 3.14
+
+Token-based setup (pasting Google/Apple Cognito tokens, `AUTH_METHOD_TOKENS`)
+failed on Python 3.14 with `TypeError: Cannot convert str to buffer` whenever
+the ID token carried an OIDC `at_hash` claim, which Cognito Hosted-UI tokens
+do. Root cause: pycognito 2024.5.1 (the current release; there has been no
+release since 2024-05) hashes the access token as a `str` in
+`Cognito.verify_token`, and PyJWT's `compute_hash_digest` on Python 3.14
+requires bytes. Reproduced locally in
+`tests/test_pycognito_compat.py::test_unpatched_pycognito_fails_to_verify_at_hash_token`
+with a self-signed RS256 JWT/JWKS pair, no network involved. Plain
+email/password login does not go through Cognito Hosted UI and is
+unaffected.
+
+Upstream context: magico13/ha-emporia-vue#454 and #439 report the same
+failure, #461 and #458 are candidate fixes, and NabuCasa/pycognito#339 is the
+real, unreleased fix. sgorilla/ha-emporia-vue ships an equivalent shim.
+
+Fix landed: `custom_components/emporia_vue/pycognito_compat.py`. It rebinds
+only `pyemvue.auth.Cognito` (the name PyEmVue's own `Auth.__init__` calls) to
+a subclass whose `verify_token` is copied from pycognito 2024.5.1 with the
+at_hash block corrected per PR #339 (encode the access token to UTF-8 bytes
+before hashing, then decode the resulting hash back to `str` before comparing
+it to the claim). `pycognito.Cognito` itself is never modified, so this
+cannot affect any other integration or library sharing the same pycognito
+install.
+
+Rejected: monkeypatching `jwt.algorithms.Algorithm.compute_hash_digest` and
+`base64.urlsafe_b64encode` process-wide for the duration of the call, the
+approach in ha-emporia-vue#458. It works, but it temporarily replaces
+process-global functions during every token verification, a wider blast
+radius than this bug needs when the narrower per-class patch (#461's
+approach) is just as effective.
+
+The patch gates itself on a runtime probe (`_at_hash_hashing_is_broken()`)
+that actually calls `compute_hash_digest` with a `str` and checks whether it
+raises, rather than comparing pycognito's version string. A version pin
+would stop protecting the integration the day pycognito ships a fix under a
+version number nobody can predict in advance; the probe instead becomes a
+no-op automatically the moment the underlying bug is gone, and the whole
+module can then be deleted without side effects. Verified the shim does not
+weaken verification:
+`tests/test_pycognito_compat.py::test_patched_cognito_still_rejects_wrong_at_hash`
+confirms a mismatched at_hash still raises `TokenVerificationException`.
+
+Unverified: whether Cognito ever issues federated (Google/Apple) tokens
+without an `at_hash` claim in some flow this integration doesn't exercise;
+the shim only changes behavior when `at_hash` is present, matching stock
+pycognito's own conditional.
