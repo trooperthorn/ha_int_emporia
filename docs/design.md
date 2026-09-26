@@ -42,3 +42,21 @@ Limiting the platform to one in-flight write at a time prevents two
 near-simultaneous changes from racing each other against the API. Sensor
 entities are read-only and backed by coordinators that already serialize
 their own API calls, so `sensor.py` sets `PARALLEL_UPDATES = 0`.
+
+## Bounded last-known-good coordinator fallback
+
+Every coordinator in `coordinator.py` (minute, day, month, device status)
+mixes in `BoundedLastKnownGoodMixin`, which serves the previous successful
+`self.data` on a failure, but only for a per-coordinator `lkg_grace` window
+measured from the first failure. Past that window the triggering
+`UpdateFailed` is (re)raised and entities go unavailable normally. This
+replaces an earlier version that fell back indefinitely; see
+[decisions.md](decisions.md) for the grace windows, the log-spam fix that
+came with it, and why a time bound was chosen over upstream's failure-count
+approach.
+
+The diagnostic `binary_sensor.emporia_vue_cloud_connection` and
+`sensor.emporia_vue_cloud_last_update` entities read
+`VueMinuteCoordinator.last_success`/`lkg_grace` as the account-wide cloud
+connectivity signal; see [decisions.md](decisions.md) for why that
+coordinator specifically.

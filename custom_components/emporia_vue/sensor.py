@@ -1,5 +1,6 @@
 """Platform for sensor integration."""
 
+from datetime import datetime
 import logging
 from typing import Any
 
@@ -16,7 +17,8 @@ from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.event import async_track_state_change_event
@@ -115,6 +117,50 @@ def _coordinator_has_native_mains_split(coordinator, device_gid: int) -> bool:
     return all(found.values())
 
 
+class EmporiaCloudLastUpdateSensor(CoordinatorEntity, SensorEntity):  # type: ignore
+    """Timestamp of the minute coordinator's last successful Emporia fetch.
+
+    Pairs with EmporiaCloudConnectivityBinarySensor in binary_sensor.py (same
+    device); see docs/decisions.md for why the minute coordinator is used as
+    the account-wide cloud-reachability signal.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "cloud_last_update"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator, entry_id: str) -> None:
+        """Initialize the last-successful-update sensor."""
+        super().__init__(coordinator)
+        self._entry_id = entry_id
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return the timestamp of the last successful fetch, if any."""
+        return getattr(self.coordinator, "last_success", None)
+
+    @property
+    def available(self) -> bool:
+        """Always available: this entity reports timing, not telemetry."""
+        return True
+
+    @property
+    def unique_id(self) -> str:
+        """Unique ID for the last-successful-update sensor."""
+        return f"emporia_vue.cloud_last_update_{self._entry_id}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return the device information for the account-level cloud device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"{self._entry_id}-cloud")},
+            name="Emporia Cloud Connection",
+            manufacturer="Emporia",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -135,6 +181,11 @@ async def async_setup_entry(
     solar_invert = config_entry.data.get("solar_invert", True)
 
     all_entities = []
+
+    if coordinator_1min is not None:
+        all_entities.append(
+            EmporiaCloudLastUpdateSensor(coordinator_1min, config_entry.entry_id)
+        )
 
     def add_scale_block(coordinator, scale_enabled: bool) -> None:
         """Create a CurrentVuePowerSensor for every real channel this coordinator has.

@@ -2,6 +2,7 @@
 
 import asyncio
 import calendar
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 import logging
@@ -31,6 +32,23 @@ from .const import (
 )
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+# Bounded last-known-good (LKG) grace windows. See docs/decisions.md.
+#
+# The minute and device-status coordinators poll every cycle (1 minute), so
+# 5 minutes tolerates up to 5 consecutive failed polls before entities go
+# unavailable -- long enough to ride out a brief DNS/network blip like the
+# one in the 2026-09-25 evidence, short enough that a real outage doesn't
+# leave stale "Charging"/on state feeding automations for long.
+#
+# The day/month coordinators only call the API every 15/30 minutes
+# respectively (the rest of each cycle just integrates local minute data),
+# so their grace is expressed as roughly two missed API refreshes rather
+# than five 1-minute polls: 30 minutes for day, 60 minutes for month.
+MINUTE_LKG_GRACE = timedelta(minutes=5)
+DEVICE_STATUS_LKG_GRACE = timedelta(minutes=5)
+DAY_LKG_GRACE = timedelta(minutes=30)
+MONTH_LKG_GRACE = timedelta(minutes=60)
 
 
 @dataclass
@@ -95,8 +113,16 @@ class VueRuntimeData:
 
             return data
         except Exception as err:
-            _LOGGER.error("Error communicating with Emporia API: %s", err)
-            raise UpdateFailed(f"Error communicating with Emporia API: {err}") from err
+            # Not logged at ERROR/WARNING here: the caller either serves
+            # bounded last-known-good data (and logs once at WARNING itself)
+            # or lets this propagate, in which case DataUpdateCoordinator
+            # logs it once on the success->failure transition. Logging here
+            # too would repeat on every failed cycle. See docs/decisions.md.
+            _LOGGER.debug("Error communicating with Emporia API: %s", err, exc_info=True)
+            raise UpdateFailed(
+                f"Error communicating with Emporia API: {err}",
+                retry_after=retry_after_seconds(err),
+            ) from err
 
     async def parse_flattened_usage_data(
         self,
@@ -154,6 +180,10 @@ class VueRuntimeData:
                     )
 
                 bidirectional = "bidirectional" in info_channel.type.lower()
+                if not bidirectional:
+                    bidirectional = merged_channel_is_bidirectional(
+                        info_channel, info.channels
+                    )
                 is_solar = info_channel.channel_type_gid == 13
                 fixed_usage = fix_usage_sign(
                     channel_num, fixed_usage, bidirectional, is_solar, self.invert_solar
@@ -386,6 +416,70 @@ def fix_usage_sign(
     return usage
 
 
+def merged_channel_is_bidirectional(
+    channel: VueDeviceChannel, channels: Iterable[VueDeviceChannel]
+) -> bool:
+    """Return True for a 'Merged' parent whose direct children are all bidirectional.
+
+    A Merged channel's own `type` never contains "bidirectional", even when
+    every channel feeding it does (e.g. all direct children are
+    `FiftyAmpBidirectional`), so without this check the combined value gets
+    abs()'d in fix_usage_sign and any exported/generated power is discarded.
+
+    Ported from upstream magico13/ha-emporia-vue PR #451, adapted to this
+    fork's per-device `VueDevice.channels` list instead of a flat channel dict.
+    """
+    if channel.type.lower() != "merged":
+        return False
+    children = [
+        candidate
+        for candidate in channels
+        if candidate.parent_channel_num == channel.channel_num
+    ]
+    return bool(children) and all(
+        "bidirectional" in child.type.lower() for child in children
+    )
+
+
+def retry_after_seconds(err: BaseException) -> float | None:
+    """Return a Retry-After-derived backoff (seconds) for a 429/5xx response.
+
+    Returns the response's `Retry-After` header value when present (assumed
+    to be a plain number of seconds; Emporia has never been observed to send
+    an HTTP-date value, so that form isn't parsed). Falls back to a flat 30
+    seconds for a 429/5xx with no header. Returns None for anything else
+    (timeouts, connection errors, 4xx other than 429) so the coordinator's
+    normal update_interval applies instead.
+    """
+    response = getattr(err, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is None or (status_code != 429 and status_code < 500):
+        return None
+    headers = getattr(response, "headers", None) or {}
+    retry_after_header = headers.get("Retry-After")
+    if retry_after_header:
+        try:
+            return float(retry_after_header)
+        except ValueError:
+            pass
+    return 30.0
+
+
+def should_serve_last_known_good(
+    degraded_since: datetime | None, now: datetime, grace: timedelta
+) -> bool:
+    """Return True while a fetch failure should still be served from LKG data.
+
+    `degraded_since` is None on the first failure (there's nothing to
+    compare against yet), so the first failure is always tolerated.
+    Subsequent failures are tolerated only while `grace`, measured from that
+    first failure, hasn't elapsed yet.
+    """
+    if degraded_since is None:
+        return True
+    return (now - degraded_since) < grace
+
+
 async def change_time_to_local(time: datetime, tz_string: str) -> datetime:
     """Change the datetime to the provided timezone, if not already."""
     loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
@@ -559,8 +653,64 @@ def is_newer_sample(candidate: datetime | None, previous: datetime | None) -> bo
     return candidate > previous
 
 
-class VueMinuteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class BoundedLastKnownGoodMixin:
+    """Time-bounded last-known-good (LKG) fallback for a DataUpdateCoordinator.
+
+    On a fetch failure, serves the previous successful `self.data` instead of
+    raising -- but only for `lkg_grace` from the *first* failure in a run.
+    Once that grace window elapses, the triggering `UpdateFailed` is
+    (re)raised so entities go unavailable rather than silently showing
+    indefinitely stale values (e.g. a "Charging" switch state hours after the
+    cloud connection dropped). See docs/decisions.md.
+
+    This preserves the bd361f6 behaviour of tolerating brief blips (and the
+    `is_newer_sample` double-count guard in the day/month coordinators is
+    untouched by this mixin), while bounding how long "brief" is allowed to
+    mean "indefinitely".
+
+    Only the initial transition into the degraded window is logged, at
+    WARNING. DataUpdateCoordinator itself already logs once (at ERROR) when
+    an eventual raised UpdateFailed flips `last_update_success` to False, and
+    once more (at INFO) on recovery -- see
+    homeassistant.helpers.update_coordinator._async_refresh -- so no
+    additional per-cycle logging is added here.
+    """
+
+    lkg_grace: timedelta
+
+    def _init_lkg_state(self) -> None:
+        """Reset LKG bookkeeping; call once from __init__."""
+        self._degraded_since: datetime | None = None
+        self.last_success: datetime | None = None
+
+    def _mark_lkg_success(self) -> None:
+        """Record a successful fetch, clearing any degraded-window state."""
+        self._degraded_since = None
+        self.last_success = datetime.now(UTC)
+
+    def _serve_lkg_or_raise(self, err: UpdateFailed) -> dict[str, Any]:
+        """Serve `self.data` while within grace, else (re)raise `err`."""
+        now = datetime.now(UTC)
+        if self.data and should_serve_last_known_good(
+            self._degraded_since, now, self.lkg_grace
+        ):
+            if self._degraded_since is None:
+                self._degraded_since = now
+                _LOGGER.warning(
+                    "%s update failed; serving last-known-good data for up to"
+                    " %s: %s",
+                    self.name,
+                    self.lkg_grace,
+                    err,
+                )
+            return self.data
+        raise err
+
+
+class VueMinuteCoordinator(BoundedLastKnownGoodMixin, DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator for 1-minute power data."""
+
+    lkg_grace = MINUTE_LKG_GRACE
 
     def __init__(self, hass: HomeAssistant, runtime: VueRuntimeData) -> None:
         """Initialize the minute coordinator."""
@@ -571,6 +721,7 @@ class VueMinuteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(minutes=1),
         )
         self.runtime = runtime
+        self._init_lkg_state()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from API endpoint at a 1 minute interval.
@@ -580,21 +731,19 @@ class VueMinuteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         try:
             data: dict = await self.runtime.update_sensors([Scale.MINUTE.value])
-        except UpdateFailed:
-            if self.data:
-                _LOGGER.warning(
-                    "Minute update failed; returning last-known-good data"
-                )
-                return self.data
-            raise
+        except UpdateFailed as err:
+            return self._serve_lkg_or_raise(err)
+        self._mark_lkg_success()
         if data:
             add_minute_mains_split(data)
             self.runtime.last_minute_data = data
         return data
 
 
-class VueDayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class VueDayCoordinator(BoundedLastKnownGoodMixin, DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator for daily energy data."""
+
+    lkg_grace = DAY_LKG_GRACE
 
     def __init__(self, hass: HomeAssistant, runtime: VueRuntimeData) -> None:
         """Initialize the day coordinator."""
@@ -605,6 +754,7 @@ class VueDayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(minutes=1),
         )
         self.runtime = runtime
+        self._init_lkg_state()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Refresh day totals from the API every 15 minutes, integrating minute data between."""
@@ -617,13 +767,9 @@ class VueDayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             runtime.last_day_update = now
             try:
                 updated_day_data = await runtime.update_sensors([Scale.DAY.value])
-            except UpdateFailed:
-                if self.data:
-                    _LOGGER.warning(
-                        "Day update failed; returning last-known-good data"
-                    )
-                    return self.data
-                raise
+            except UpdateFailed as err:
+                return self._serve_lkg_or_raise(err)
+            self._mark_lkg_success()
             apply_api_update_debounce(updated_day_data, runtime.last_day_data, "day")
             # Preserve locally-accumulated Import/Export totals across the
             # API refresh; Emporia's API doesn't provide these directly.
@@ -674,8 +820,10 @@ class VueDayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return runtime.last_day_data
 
 
-class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class VueMonthCoordinator(BoundedLastKnownGoodMixin, DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator for monthly (billing cycle) energy data."""
+
+    lkg_grace = MONTH_LKG_GRACE
 
     def __init__(self, hass: HomeAssistant, runtime: VueRuntimeData) -> None:
         """Initialize the month coordinator."""
@@ -686,6 +834,7 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(minutes=1),
         )
         self.runtime = runtime
+        self._init_lkg_state()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Refresh month totals from the API every 30 minutes, integrating minute data between."""
@@ -698,13 +847,9 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             runtime.last_month_update = now
             try:
                 updated_month_data = await runtime.update_sensors([Scale.MONTH.value])
-            except UpdateFailed:
-                if self.data:
-                    _LOGGER.warning(
-                        "Month update failed; returning last-known-good data"
-                    )
-                    return self.data
-                raise
+            except UpdateFailed as err:
+                return self._serve_lkg_or_raise(err)
+            self._mark_lkg_success()
             apply_api_update_debounce(
                 updated_month_data,
                 runtime.last_month_data,
@@ -755,7 +900,9 @@ class VueMonthCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return runtime.last_month_data
 
 
-class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+class VueDeviceStatusCoordinator(
+    BoundedLastKnownGoodMixin, DataUpdateCoordinator[dict[str, Any]]
+):
     """Coordinator for outlet/EV charger device status.
 
     Issues the raw request rather than calling `PyEmVue.get_devices_status()`,
@@ -773,6 +920,8 @@ class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     #: successful fetch, so it survives the last-known-good path below.
     loads: dict[int, dict[str, Any]]
 
+    lkg_grace = DEVICE_STATUS_LKG_GRACE
+
     def __init__(self, hass: HomeAssistant, vue: PyEmVue) -> None:
         """Initialize the device status coordinator."""
         super().__init__(
@@ -783,6 +932,7 @@ class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.vue = vue
         self.loads = {}
+        self._init_lkg_state()
 
     def _fetch_status(self) -> dict[str, Any]:
         """Blocking: GET the device-status endpoint and return the raw body."""
@@ -816,13 +966,19 @@ class VueDeviceStatusCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for entry in raw.get("loads") or []
                 if entry.get("loadGid") is not None
             }
-            return data
         except Exception as err:
-            if self.data:
-                _LOGGER.warning(
-                    "Error communicating with Emporia API: %s; "
-                    "returning last-known-good data",
-                    err,
+            # See the comment in VueRuntimeData.update_sensors: not logged
+            # here to avoid repeating on every failed cycle.
+            _LOGGER.debug("Error communicating with Emporia API: %s", err, exc_info=True)
+            wrapped = (
+                err
+                if isinstance(err, UpdateFailed)
+                else UpdateFailed(
+                    f"Error communicating with Emporia API: {err}",
+                    retry_after=retry_after_seconds(err),
                 )
-                return self.data
-            raise UpdateFailed(f"Error communicating with Emporia API: {err}") from err
+            )
+            wrapped.__cause__ = err
+            return self._serve_lkg_or_raise(wrapped)
+        self._mark_lkg_success()
+        return data

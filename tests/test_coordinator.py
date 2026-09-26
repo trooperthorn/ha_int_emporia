@@ -5,9 +5,14 @@ math/logic that's easy to get subtly wrong: sign handling, reset-window
 detection, and the derived Mains Import/Export split.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from custom_components.emporia_vue.coordinator import (
+    BoundedLastKnownGoodMixin,
+    UpdateFailed,
     add_minute_mains_split,
     apply_api_update_debounce,
     carry_forward_mains_split,
@@ -16,6 +21,9 @@ from custom_components.emporia_vue.coordinator import (
     get_sample_timestamp,
     is_in_reset_debounce_window,
     is_newer_sample,
+    merged_channel_is_bidirectional,
+    retry_after_seconds,
+    should_serve_last_known_good,
 )
 
 
@@ -190,3 +198,152 @@ def test_get_sample_timestamp_none_when_empty_or_missing():
     """An empty batch, or one with no timestamped entries, yields None."""
     assert get_sample_timestamp({}) is None
     assert get_sample_timestamp({"123-1-1MIN": {"usage": 1.0}}) is None
+
+
+@dataclass
+class _FakeChannel:
+    """Minimal stand-in for pyemvue's VueDeviceChannel in these tests."""
+
+    channel_num: str
+    type: str
+    parent_channel_num: str | None = None
+
+
+def test_merged_channel_is_bidirectional_when_all_children_are():
+    """A Merged parent with only bidirectional direct children is bidirectional."""
+    merged = _FakeChannel(channel_num="97", type="Merged")
+    children = [
+        _FakeChannel(channel_num="12", type="FiftyAmpBidirectional", parent_channel_num="97"),
+        _FakeChannel(channel_num="13", type="FiftyAmpBidirectional", parent_channel_num="97"),
+    ]
+    assert merged_channel_is_bidirectional(merged, [merged, *children]) is True
+
+
+def test_merged_channel_not_bidirectional_with_mixed_children():
+    """A Merged parent is not bidirectional if any direct child isn't."""
+    merged = _FakeChannel(channel_num="97", type="Merged")
+    children = [
+        _FakeChannel(channel_num="12", type="FiftyAmpBidirectional", parent_channel_num="97"),
+        _FakeChannel(channel_num="13", type="FiftyAmp", parent_channel_num="97"),
+    ]
+    assert merged_channel_is_bidirectional(merged, [merged, *children]) is False
+
+
+def test_merged_channel_not_bidirectional_with_no_children():
+    """A childless Merged channel is not classified as bidirectional."""
+    merged = _FakeChannel(channel_num="97", type="Merged")
+    assert merged_channel_is_bidirectional(merged, [merged]) is False
+
+
+def test_non_merged_channel_ignores_child_metadata():
+    """A non-Merged channel is never classified by child metadata."""
+    branch = _FakeChannel(channel_num="12", type="FiftyAmp")
+    child = _FakeChannel(channel_num="13", type="FiftyAmpBidirectional", parent_channel_num="12")
+    assert merged_channel_is_bidirectional(branch, [branch, child]) is False
+
+
+class _FakeResponse:
+    """Minimal stand-in for a requests.Response in these tests."""
+
+    def __init__(self, status_code: int, headers: dict | None = None) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class _FakeHttpError(Exception):
+    """Minimal stand-in for requests.exceptions.HTTPError in these tests."""
+
+    def __init__(self, response: _FakeResponse) -> None:
+        super().__init__("http error")
+        self.response = response
+
+
+def test_retry_after_seconds_uses_header_on_429():
+    """A 429 with a Retry-After header uses that value."""
+    err = _FakeHttpError(_FakeResponse(429, {"Retry-After": "12"}))
+    assert retry_after_seconds(err) == 12.0
+
+
+def test_retry_after_seconds_defaults_on_5xx_without_header():
+    """A 5xx with no Retry-After header falls back to 30 seconds."""
+    err = _FakeHttpError(_FakeResponse(503))
+    assert retry_after_seconds(err) == 30.0
+
+
+def test_retry_after_seconds_none_for_other_4xx():
+    """A non-429 4xx (e.g. the 2026-09-16 outage's HTTP 400) has no backoff."""
+    err = _FakeHttpError(_FakeResponse(400))
+    assert retry_after_seconds(err) is None
+
+
+def test_retry_after_seconds_none_without_response():
+    """A plain exception with no `.response` (e.g. a timeout) has no backoff."""
+    assert retry_after_seconds(TimeoutError("connect timeout")) is None
+
+
+def test_should_serve_last_known_good_true_on_first_failure():
+    """The very first failure is always tolerated (nothing to compare yet)."""
+    now = datetime(2026, 9, 25, 21, 0, tzinfo=UTC)
+    assert should_serve_last_known_good(None, now, timedelta(minutes=5)) is True
+
+
+def test_should_serve_last_known_good_true_within_grace():
+    """A failure within the grace window since the first failure is tolerated."""
+    degraded_since = datetime(2026, 9, 25, 21, 0, tzinfo=UTC)
+    now = degraded_since + timedelta(minutes=4)
+    assert should_serve_last_known_good(degraded_since, now, timedelta(minutes=5)) is True
+
+
+def test_should_serve_last_known_good_false_past_grace():
+    """A failure past the grace window is no longer tolerated."""
+    degraded_since = datetime(2026, 9, 25, 21, 0, tzinfo=UTC)
+    now = degraded_since + timedelta(minutes=6)
+    assert should_serve_last_known_good(degraded_since, now, timedelta(minutes=5)) is False
+
+
+class _FakeLkgCoordinator(BoundedLastKnownGoodMixin):
+    """Exercises BoundedLastKnownGoodMixin without a real DataUpdateCoordinator."""
+
+    def __init__(self, lkg_grace: timedelta) -> None:
+        self.name = "test"
+        self.lkg_grace = lkg_grace
+        self.data = None
+        self._init_lkg_state()
+
+
+def test_bounded_lkg_raises_immediately_without_prior_data():
+    """With no previous data there's nothing to fall back to; raise right away."""
+    coordinator = _FakeLkgCoordinator(timedelta(minutes=5))
+    with pytest.raises(UpdateFailed):
+        coordinator._serve_lkg_or_raise(UpdateFailed("boom"))
+
+
+def test_bounded_lkg_serves_data_within_grace():
+    """A failure with prior data, within grace, serves the last-known-good data."""
+    coordinator = _FakeLkgCoordinator(timedelta(minutes=5))
+    coordinator.data = {"a": 1}
+    result = coordinator._serve_lkg_or_raise(UpdateFailed("boom"))
+    assert result == {"a": 1}
+    assert coordinator._degraded_since is not None
+
+
+def test_bounded_lkg_raises_once_grace_elapses():
+    """Once the grace window (measured from the first failure) elapses, raise."""
+    coordinator = _FakeLkgCoordinator(timedelta(minutes=5))
+    coordinator.data = {"a": 1}
+    coordinator._degraded_since = datetime.now(UTC) - timedelta(minutes=10)
+    with pytest.raises(UpdateFailed):
+        coordinator._serve_lkg_or_raise(UpdateFailed("boom"))
+
+
+def test_bounded_lkg_success_clears_degraded_state():
+    """A successful fetch clears the degraded window and records the time."""
+    coordinator = _FakeLkgCoordinator(timedelta(minutes=5))
+    coordinator.data = {"a": 1}
+    coordinator._serve_lkg_or_raise(UpdateFailed("boom"))
+    assert coordinator._degraded_since is not None
+    assert coordinator.last_success is None
+
+    coordinator._mark_lkg_success()
+    assert coordinator._degraded_since is None
+    assert coordinator.last_success is not None
