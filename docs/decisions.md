@@ -187,3 +187,125 @@ Unverified: whether Cognito ever issues federated (Google/Apple) tokens
 without an `at_hash` claim in some flow this integration doesn't exercise;
 the shim only changes behavior when `at_hash` is present, matching stock
 pycognito's own conditional.
+
+## 2026-09-26: bounded last-known-good fallback, replacing indefinite fallback
+
+On 2026-09-25 the house internet/DNS was down for about an hour. The minute,
+day, month, and device-status coordinators all held onto `self.data`
+indefinitely on any failure (added for brief cloud blips; see the bd361f6
+history in this file's earlier entries), so `switch.ev_charger` kept reporting
+"Charging" the entire time and automations acted on hour-old state. Each
+failed cycle also logged at both ERROR (inside `update_sensors`) and WARNING
+(inside the coordinator), every minute, for the whole outage.
+
+The fallback is now time-bounded via `BoundedLastKnownGoodMixin` in
+`coordinator.py`. Each coordinator tracks `_degraded_since` (set on the first
+failure after a success) and keeps serving `self.data` only while
+`datetime.now(UTC) - _degraded_since < lkg_grace`; once that elapses, the
+triggering `UpdateFailed` is (re)raised and entities go unavailable, same as
+if no fallback existed at all. `is_newer_sample`'s double-count guard in the
+day/month coordinators is unchanged by this.
+
+Grace windows, chosen relative to each coordinator's own fetch cadence:
+
+- Minute power and device status (charger/outlet): **5 minutes**. Both poll
+  every cycle (1 minute), so this tolerates 5 consecutive failed polls, long
+  enough for a brief DNS/network blip, short enough that a real outage
+  doesn't leave a stale charger/switch state feeding automations for long.
+- Day energy: **30 minutes**. The day coordinator only calls the API every 15
+  minutes (the rest of each cycle integrates local minute data), so 30
+  minutes covers two missed API refreshes rather than five 1-minute polls.
+- Month energy: **60 minutes**, by the same reasoning against its 30-minute
+  API refresh cadence.
+
+Also fixed as part of the same change: `update_sensors()` and
+`VueDeviceStatusCoordinator._async_update_data()` no longer log at
+ERROR/WARNING on every failed cycle. `DataUpdateCoordinator` itself already
+logs once (ERROR) when a raised `UpdateFailed` flips `last_update_success` to
+False, and once more (INFO) on recovery
+(`homeassistant.helpers.update_coordinator._async_refresh`); combined with a
+single WARNING logged by the mixin at the moment the degraded window opens,
+this replaces per-cycle log spam with exactly two log lines per outage.
+
+Rejected: the upstream magico13/ha-emporia-vue PR #452 approach (tolerate a
+fixed *count* of consecutive failures, e.g. 2, rather than a time window).
+A count is agnostic to how long each attempt takes, which matters less for
+the minute coordinator (fixed 1-minute cadence) but doesn't map cleanly onto
+the day/month coordinators, whose "failure" only happens once per 15/30
+minute API refresh; a time-bound expressed directly in minutes was clearer
+here and is what this fork's evidence and task called for.
+
+## 2026-09-26: connectivity diagnostics use the minute coordinator as the signal
+
+Added a diagnostic `binary_sensor.emporia_vue_cloud_connection`
+(`device_class: connectivity`) and `sensor.emporia_vue_cloud_last_update`
+(`device_class: timestamp`), both `entity_category: diagnostic`, grouped
+under a synthetic "Emporia Cloud Connection" service device
+(`DeviceEntryType.SERVICE`) rather than any specific Vue panel/circuit
+device, since cloud reachability is account-wide, not per-device.
+
+Both track `VueMinuteCoordinator` specifically rather than aggregating across
+all four coordinators: it has the tightest polling cadence (1 minute) and
+shares the same authenticated PyEmVue session every other coordinator uses,
+so it is the most timely proxy for "is the Emporia cloud reachable right
+now." The day/month coordinators would lag this signal by up to 30/60
+minutes purely due to their own cadence, which would make the connectivity
+sensor slower to report a real outage, not more accurate.
+
+Compared against upstream PR #452, which instead exposes retry-count and
+API-latency sensors (`Emporia API Retries`, `Emporia API Latency`) built on a
+count-based `TolerantUpdateMethod` wrapper. Not ported:
+
+- The retry-count/latency sensors themselves. They fit a count-based
+  tolerance model; this fork's time-bounded model is more directly expressed
+  as "are we currently within grace" (the connectivity binary sensor) and
+  "when did we last succeed" (the timestamp sensor), which is also what the
+  task asked for.
+- `TolerantUpdateMethod`, a generic wrapper class around a coordinator's
+  `update_method`. This fork's coordinators already have bespoke
+  `_async_update_data` methods (day/month interleave local minute
+  integration with periodic API refreshes) rather than a single wrapped
+  callable, so `BoundedLastKnownGoodMixin` (a mixin the coordinator classes
+  opt into directly) fit the existing architecture better than introducing a
+  parallel update-method wrapper.
+
+Borrowed in spirit: PR #452's core idea of bounding "how long is brief"
+before falling back, and its README documentation pattern for the resulting
+diagnostics.
+
+## 2026-09-26: login errors only reauth on a genuine Cognito auth failure
+
+On 2026-09-16 Emporia's `/customers` endpoint returned HTTP 400 for about
+2h40m. `async_setup_entry` caught *any* exception from `vue.login` (which
+also calls `get_customer_details()` internally) and turned it into
+`ConfigEntryAuthFailed`, which forces Home Assistant's reauth flow — so every
+affected user was prompted to re-enter credentials for an outage that had
+nothing to do with credentials. The same blanket catch would also convert a
+Cognito connect timeout (the 2026-09-25 evidence) into a reauth prompt.
+
+`async_setup_entry` now only raises `ConfigEntryAuthFailed` for:
+
+- `vue.login()` returning `False` (pyemvue's own signal for bad
+  credentials; it already catches Cognito's `NotAuthorizedException`
+  internally and returns `False` for it), or
+- a `botocore.exceptions.ClientError` whose `response["Error"]["Code"]` is
+  exactly `NotAuthorizedException` (kept as a defensive case in
+  `_is_cognito_not_authorized`, in case a future pyemvue version stops
+  swallowing it, or another Cognito call path raises it directly).
+
+Everything else — connect timeouts, other botocore `ClientError` codes
+(rate limiting, internal errors), and `requests.exceptions.HTTPError` from
+Emporia's own API after a successful Cognito step — now raises
+`ConfigEntryNotReady`, which Home Assistant retries automatically with
+backoff instead of demanding reauth.
+
+Rejected: upstream magico13/ha-emporia-vue PR #467's fix, which changes the
+generic `except Exception` to always raise `ConfigEntryNotReady` (with no
+narrower case for auth failures at all). Since pyemvue's `login()` still
+returns `True`/`False` rather than always raising, PR #467's `except
+Exception` block is never reached for the ordinary bad-password case, so in
+practice it isn't a regression in that codebase either — but it also does
+nothing to positively assert "genuine auth failure still means auth failure"
+if pyemvue's exception-swallowing behavior ever changes. This fork's
+`_is_cognito_not_authorized` check is that explicit, testable statement of
+the distinction.
