@@ -11,13 +11,17 @@ These don't touch the network or a running HA instance. They cover:
   Plugs/outlets, and single-CT solar monitors.
 """
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from pyemvue.device import ChargerDevice, OutletDevice, VueDevice, VueDeviceChannel
 
 from custom_components.emporia_vue.sensor import (
     _car_accepting_charge,
+    _charger_reports_offline,
     _device_is_true_mains_panel,
+    _hold_through_offline,
     _map_charger_state,
 )
 
@@ -177,3 +181,37 @@ def test_outlet_device_with_extra_channels_is_still_excluded():
     """The outlet exclusion applies regardless of channel shape."""
     device = _make_device(55555, ["1,2,3", "4"], outlet=OutletDevice(gid=55555))
     assert _device_is_true_mains_panel(device) is False
+
+
+NOW = datetime(2026, 11, 2, 18, 42)
+OFFLINE = ("Disconnected", "A")
+CHARGING = ("Charging", "C")
+
+
+def test_offline_blip_holds_last_charging_state():
+    """A 2-minute DeviceNotConnected blip must not flip Charging to Disconnected."""
+    held = _hold_through_offline(OFFLINE, True, CHARGING, NOW - timedelta(minutes=2), NOW)
+    assert held == CHARGING
+
+
+def test_offline_past_grace_reports_disconnected():
+    """An outage longer than the grace window is reported as it is."""
+    held = _hold_through_offline(OFFLINE, True, CHARGING, NOW - timedelta(minutes=11), NOW)
+    assert held == OFFLINE
+
+
+def test_car_not_connected_is_never_held():
+    """A genuine unplug (charger online) reports immediately."""
+    held = _hold_through_offline(OFFLINE, False, CHARGING, NOW - timedelta(minutes=1), NOW)
+    assert held == OFFLINE
+
+
+def test_offline_with_no_prior_state_reports_disconnected():
+    """After a restart there is nothing to hold, so report the mapped state."""
+    assert _hold_through_offline(OFFLINE, True, None, None, NOW) == OFFLINE
+
+
+def test_charger_reports_offline_detection():
+    assert _charger_reports_offline("DeviceNotConnected", None)
+    assert _charger_reports_offline("Standby", "DeviceNotConnected")
+    assert not _charger_reports_offline("Standby", "CarNotConnected")
