@@ -1,6 +1,6 @@
 """Platform for sensor integration."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
@@ -549,6 +549,38 @@ def _car_accepting_charge(message: str | None) -> bool:
 
 CHARGER_STATUS_OPTIONS = ["Disconnected", "Connected", "Charging", "Error"]
 
+#: How long a charger that reports itself offline keeps its last present
+#: state. The Emporia cloud intermittently flags the charger
+#: DeviceNotConnected / "Offline" for 1-7 minutes at a time while it is still
+#: delivering power, which flapped the status sensor Charging <-> Disconnected.
+CHARGER_OFFLINE_GRACE = timedelta(minutes=10)
+
+
+def _charger_reports_offline(status: str | None, icon_name: str | None) -> bool:
+    """Return True when the charger itself, not the car, is unreachable."""
+    return (status or "").strip().lower() == "devicenotconnected" or (
+        (icon_name or "").strip().lower() in ("devicenotconnected", "offline")
+    )
+
+
+def _hold_through_offline(
+    mapped: tuple[str, str],
+    offline: bool,
+    last_present: tuple[str, str] | None,
+    last_present_at: datetime | None,
+    now: datetime,
+    grace: timedelta = CHARGER_OFFLINE_GRACE,
+) -> tuple[str, str]:
+    """Keep the last Charging/Connected state through a short offline blip."""
+    if (
+        offline
+        and last_present is not None
+        and last_present_at is not None
+        and now - last_present_at < grace
+    ):
+        return last_present
+    return mapped
+
 
 class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: ignore
     """Representation of an Emporia Charger status sensor."""
@@ -564,16 +596,31 @@ class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: igno
         self._attr_device_class = SensorDeviceClass.ENUM
         self._attr_options = CHARGER_STATUS_OPTIONS
         self._attr_icon = "mdi:ev-station"
+        self._last_present: tuple[str, str] | None = None
+        self._last_present_at: datetime | None = None
+
+    def _resolve(self, data: ChargerDevice) -> tuple[str, str]:
+        """Map the payload to (state, iec), holding through brief offline blips."""
+        mapped = _map_charger_state(
+            data.status, data.message, data.fault_text, data.icon
+        )
+        now = datetime.now()
+        if mapped[0] in ("Charging", "Connected"):
+            self._last_present, self._last_present_at = mapped, now
+        return _hold_through_offline(
+            mapped,
+            _charger_reports_offline(data.status, data.icon),
+            self._last_present,
+            self._last_present_at,
+            now,
+        )
 
     @property
     def native_value(self) -> str:
         """Return the human-friendly charger status."""
         data: ChargerDevice | None = self.coordinator.data.get(self._device_gid)
         if data:
-            state, _ = _map_charger_state(
-                data.status, data.message, data.fault_text, data.icon
-            )
-            return state
+            return self._resolve(data)[0]
         return "Unknown"
 
     @property
@@ -581,11 +628,10 @@ class EmporiaChargerStatusSensor(CoordinatorEntity, SensorEntity):  # type: igno
         """Return IEC code and raw Emporia values as attributes."""
         data: ChargerDevice | None = self.coordinator.data.get(self._device_gid)
         if data:
-            _, iec_code = _map_charger_state(
-                data.status, data.message, data.fault_text, data.icon
-            )
+            _, iec_code = self._resolve(data)
             return {
                 "iec_status": iec_code,
+                "charger_offline": _charger_reports_offline(data.status, data.icon),
                 "raw_status": data.status,
                 "raw_message": data.message,
                 "fault_text": data.fault_text,
